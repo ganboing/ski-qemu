@@ -2,6 +2,14 @@
 #
 # QAPI Schema
 
+## <PF>
+# @piking-select-cpu:
+#
+##
+#{ 'command': 'piking-select-cpu' }
+## </PF>
+
+
 ##
 # @NameInfo:
 #

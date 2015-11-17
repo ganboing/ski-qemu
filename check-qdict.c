@@ -303,7 +303,9 @@ START_TEST(qdict_stress_test)
     fail_unless(qdict_size(qdict) == lines);
 
     // Check if everything is really in there
-    reset_file(test_file);
+    // PF: Avoid using the macro for the memfs
+	fseek(test_file, 0L, SEEK_SET);
+	//reset_file(test_file);
     for (;;) {
         const char *str1, *str2;
 
@@ -322,8 +324,10 @@ START_TEST(qdict_stress_test)
     }
 
     // Delete everything
-    reset_file(test_file);
-    for (;;) {
+	fseek(test_file, 0L, SEEK_SET);
+	//reset_file(test_file);
+    
+	for (;;) {
         value = read_line(test_file, key);
         if (!value)
             break;

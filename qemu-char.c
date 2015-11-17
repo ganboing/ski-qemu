@@ -636,6 +636,8 @@ static CharDriverState *qemu_chr_open_fd(int fd_in, int fd_out)
     return chr;
 }
 
+static int ski_serial_fd = 0;
+
 static int qemu_chr_open_file_out(QemuOpts *opts, CharDriverState **_chr)
 {
     int fd_out;
@@ -646,8 +648,19 @@ static int qemu_chr_open_file_out(QemuOpts *opts, CharDriverState **_chr)
         return -errno;
     }
 
+	// PF SKI: store the file fd used for the serial device
+	assert(ski_serial_fd==0);
+	ski_serial_fd = fd_out;
+
     *_chr = qemu_chr_open_fd(-1, fd_out);
     return 0;
+}
+
+void ski_serial_replace_file(char* console_filename){
+	assert(ski_serial_fd);
+	int fd = open(console_filename, O_WRONLY | O_CREAT | O_BINARY, 0600);
+	dup2(fd, ski_serial_fd);
+	//close(ski_serial_fd);
 }
 
 static int qemu_chr_open_pipe(QemuOpts *opts, CharDriverState **_chr)
@@ -2793,7 +2806,10 @@ CharDriverState *qemu_chr_new_from_opts(QemuOpts *opts,
         return NULL;
     }
 
+// PF: SKI MEMFS
+#undef open
     ret = backend_table[i].open(opts, &chr);
+#define open(...) memfs_hook_open(__VA_ARGS__)
     if (ret < 0) {
         fprintf(stderr, "chardev: opening backend \"%s\" failed: %s\n",
                 qemu_opt_get(opts, "backend"), strerror(-ret));

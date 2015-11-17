@@ -21,6 +21,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+//#include "ski-memfs.h"
+
+#include "forkall-coop.h"
+#include "ski-stats.h"
+#include "ski-debug.h"
+#include "ski-input.h"
+
+#include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -167,6 +175,12 @@ int main(int argc, char **argv)
 
 #include "ui/qemu-spice.h"
 
+#include "ski-config.h"
+#include "ski-ipfilter.h"
+#include "ski-by-eip.h"
+#include "utlist.h"
+
+
 //#define DEBUG_NET
 //#define DEBUG_SLIRP
 
@@ -233,6 +247,94 @@ int boot_menu;
 uint8_t *boot_splash_filedata;
 int boot_splash_filedata_size;
 uint8_t qemu_extra_params_fw[2];
+
+#define SKI_FILENAME_MAX 1024
+
+int ski_init_options_preemptions[SKI_MAX_PREEMPTION_POINTS];
+int ski_init_options_preemptions_len;
+int ski_init_options_nr_cpus = 0;
+int ski_init_options_preemption_mode = SKI_PREEMPTION_MODE_CPU_AND_NONTIMER;
+int ski_init_options_quit_hypercall_threshold = 1;
+int ski_init_options_debug_assert_trap_enabled = 1;
+int ski_init_options_preemption_by_eip = 0;
+char ski_init_options_priorities_filename[SKI_FILENAME_MAX];
+char ski_init_options_ipfilter_filename[SKI_FILENAME_MAX];
+int ski_init_options_gdbstub = 0;
+int ski_init_options_seed = 1;
+int ski_init_options_fast_resume=0;
+int ski_init_options_forkall_rounds = 0;
+int ski_init_options_input_number[SKI_CPUS_MAX];
+int ski_init_options_forkall_concurrency = 0;
+int ski_init_options_forkall_preemption_points = 1;
+int ski_init_options_forkall_k_initial = 1000;
+int ski_init_options_forkall_k = 1000;
+int ski_init_options_watchdog_seconds = 0;
+int ski_init_options_heuristics_statistics_enabled = 0;
+int ski_init_options_debug_child_wait_start_seconds = 0;
+int ski_init_options_debug_parent_executes_enabled = 0;
+int ski_init_options_dir_per_input_enabled = 0;
+int ski_init_options_debug_exit_after_hypercall_enabled = 0;
+int ski_init_options_race_detector_enabled = 0;
+int ski_init_options_debug_only_aggregate_output_enabled = 0;
+
+int ski_init_options_trace_instructions_enabled = 0;
+int ski_init_options_trace_memory_accesses_enabled = 0;
+
+
+char ski_init_kernel_filename[1024];
+char ski_init_kernel_sha1[256];
+int ski_init_kernel_size = 0;
+char ski_init_disk_filename[1024];
+char ski_init_disk_sha1[256];
+int ski_init_disk_size = 0;
+
+char ski_init_options_destination_dir[1024];
+char ski_init_options_instructions_detector_filename[1024];
+char ski_init_options_selective_trace_filename[1024];
+char ski_init_options_input_filename[1024];
+char ski_init_options_input_pairs_filename[1024];
+
+// Used by the forkall to take measuremnts of the spawning process.. XXX: Rename them
+//struct timeval tvFirst, tvBegin, tvEnd, tvDiff, tvDiffTotal;
+
+char ski_snapshot_name_auto[1024];
+
+extern int ski_snapshot;
+
+#include <ski-sha1.h>
+#define SKI_HASH_BUFFER_SIZE 20*1024*1024
+#define SKI_HASH_READ_MAX 50*1000*1000
+
+
+#ifdef SKI_IPFILTER_HASH
+
+ski_ipfilter_hash_entry * ski_ipfilter_hash = NULL;
+ski_preeemption_by_eip_entry * ski_preeemption_by_eip = NULL;
+ski_ipfilter_hash_entry ski_ipfilter_hash_values[MAX_IPFILTER_HASH];
+int ski_ipfilter_hash_values_n = 0;
+// Backup up variables 
+ski_ipfilter_hash_entry *ski_ipfilter_hash_backup = NULL;
+ski_ipfilter_hash_entry ski_ipfilter_hash_values_backup[MAX_IPFILTER_HASH];
+int ski_ipfilter_hash_values_backup_n = 0;
+
+#else // SKI_IPFILTER_HASH
+
+ski_ipfilter_range ski_init_ipfilter_ranges[MAX_SKI_IPFILTER_RANGES];
+int ski_init_ipfilter_ranges_count = 0;
+
+#endif // SKI_IPFILTER_HASH
+
+
+
+void ski_forkall_wait_firstcpu(void);
+void ski_forkall_release_locks(void);
+void ski_forkall_aquire_locks(void);
+void ski_forkall_reinit_qemu_init_cpu_loop(void);
+
+
+void ski_eipfilter_add_stats(ski_stats *stats);
+
+extern moncontrol(int mode);
 
 typedef struct FWBootEntry FWBootEntry;
 
@@ -1030,6 +1132,548 @@ static void smp_parse(const char *optarg)
     if (max_cpus == 0)
         max_cpus = smp_cpus;
 }
+
+#ifdef SKI_IPFILTER_HASH
+void ski_ipfilter_loadfile_hash(char *ipfilter_filename){
+    int i;
+    char comment_chr = '#';
+	FILE *f;
+    
+    if (!strlen(ipfilter_filename) || !(f = fopen(ipfilter_filename,"r"))){
+        printf("[SKI] Error: Not able to load the file %s\n", ipfilter_filename);
+		assert(0);
+    }
+
+    SKI_INFO_NOCPU("[SKI] Reading the ip filter file: %s (HASH version)\n", ipfilter_filename);
+	while(1){
+        char buffer[128];
+        char *res_str;
+        int res;
+		int eip;
+        buffer[0]=0;
+
+        res_str = fgets(buffer,128-1,f);
+        if(res_str ==0){
+            SKI_INFO_NOCPU("[SKI] Ip filter EOF\n");
+			int count = HASH_COUNT(ski_ipfilter_hash); 
+            SKI_INFO_NOCPU("[SKI] Finished reading the ip filter file (count = %d)\n", count);
+			// Success
+			fclose(f);
+            return;
+        }
+        char *comment_pos;
+        comment_pos = strchr(buffer, comment_chr);
+		if (comment_pos){
+            *comment_pos = 0;
+        }
+
+        res = sscanf(res_str,"%x", &eip);
+        //ski_ipfilter_hash_entry* entry  = calloc(1,sizeof(ski_ipfilter_hash_entry));
+		assert(ski_ipfilter_hash_values_n<MAX_IPFILTER_HASH);
+		ski_ipfilter_hash_entry* entry  = &ski_ipfilter_hash_values[ski_ipfilter_hash_values_n];
+		ski_ipfilter_hash_entry* entry_backup = &ski_ipfilter_hash_values_backup[ski_ipfilter_hash_values_backup_n];
+		ski_ipfilter_hash_values_n++;
+		ski_ipfilter_hash_values_backup_n++;
+
+		assert(entry);
+        //printf("[SKI] start: %d end: %d res: %d\n", start,end,res);
+        if(res == 1){
+            entry->eip = eip;
+            entry_backup->eip = eip;
+			HASH_ADD_INT(ski_ipfilter_hash, eip, entry);
+        }else{
+            printf("[SKI] Error: Unable to process the ip filter (sscanf)\n");
+            perror("error: ");
+            assert(0);
+        }
+		//ski_control_preemptionlist_print(entry->eip);
+        //SKI_INFO_NOCPU("[SKI] Added ip filter: %x\n", entry->eip);
+    }
+}
+
+// Used to avoid calling the ski_ipfilter_loadfile_hash function multiple times (which reads from file)
+void ski_ipfilter_save(){
+	// Backup up variables 
+	/*
+	ski_ipfilter_hash_backup = ski_ipfilter_hash;
+	memcpy(ski_ipfilter_hash_values_backup, ski_ipfilter_hash_values, sizeof(ski_ipfilter_hash_entry)*ski_ipfilter_hash_values_n);
+	ski_ipfilter_hash_values_backup_n = ski_ipfilter_hash_values_n;
+	*/
+}
+
+// Used when we go to a different input
+void ski_ipfilter_restore(){
+	printf("[SKI] Restoring the ipfilter\n");
+	HASH_CLEAR(hh,ski_ipfilter_hash);
+	ski_ipfilter_hash_values_n = 0;
+	int i;
+
+	for(i=0;i<ski_ipfilter_hash_values_backup_n;i++){
+		ski_ipfilter_hash_entry* entry  = &ski_ipfilter_hash_values[i];
+		int eip = ski_ipfilter_hash_values_backup[i].eip;
+		entry->eip = eip;
+		HASH_ADD_INT(ski_ipfilter_hash, eip, entry);
+		ski_ipfilter_hash_values_n++;
+	}
+
+	printf("[SKI] Finished restoring the ipfilter\n");
+
+	/*
+	ski_ipfilter_hash = ski_ipfilter_hash_backup;
+	memcpy(ski_ipfilter_hash_values, ski_ipfilter_hash_values_backup, sizeof(ski_ipfilter_hash_entry)*ski_ipfilter_hash_values_backup_n);
+	ski_ipfilter_hash_values_n = ski_ipfilter_hash_values_backup_n;
+	*/
+}
+
+/* Moved to ski-stats.h to inline the function
+int ski_eipfilter_add_entry(unsigned int eip){
+	ski_ipfilter_hash_entry* entry;
+	
+	HASH_FIND_INT(ski_ipfilter_hash, &eip, entry);
+
+	if(entry == 0){
+		//entry = calloc(1,sizeof(ski_ipfilter_hash_entry));
+		//assert(entry);
+
+		assert(ski_ipfilter_hash_values_n<MAX_IPFILTER_HASH);
+		entry = &ski_ipfilter_hash_values[ski_ipfilter_hash_values_n];
+		ski_ipfilter_hash_values_n++;
+
+		entry->eip = eip;
+		HASH_ADD_INT(ski_ipfilter_hash, eip, entry);
+//		ski_control_preemptionlist_print(entry->eip);
+		//SKI_INFO_NOCPU("[SKI] Added ip filter: %x\n", entry->eip);
+		return 1;
+	}
+	return 0;
+}
+*/
+
+int ski_eipfilter_count_entries(){
+	return HASH_COUNT(ski_ipfilter_hash);
+}
+
+// Initially it was a function to find an entry in the ski_preeemption_by_eip structure
+//int ski_preemption_by_eip_namecmp(ski_preeemption_by_eip_entry *a, ski_preeemption_by_eip_entry *b) {
+//    return a->eip == b->eip;
+//}
+
+
+/* OBSOLETE
+void ski_preemption_by_eip_init(int total_preemptions){
+	printf("[SKI] ski_preemption_by_eip_init()\n");
+	int total_eips = HASH_COUNT(ski_ipfilter_hash);
+	int i;
+
+	if ((total_eips == 0) || (total_preemptions == 0)){
+		return;
+	}
+
+	assert(total_eips > 0);	
+	assert(total_preemptions > 0);
+
+	printf("[SKI] ski_preemption_by_eip_init - using seed: %d\n", ski_init_options_seed);
+	printf("[SKI] Changing the random seed to %d in ski_preemption_by_eip_init()\n", ski_init_options_seed);
+	srandom(ski_init_options_seed);
+
+	for(i=0;i<total_preemptions;i++){
+		int r = random() % total_eips;
+		int j = 0;
+		int eip = 0;
+		ski_ipfilter_hash_entry* e_ipfilter;
+		ski_preeemption_by_eip_entry * e_by_eip;
+
+		for(e_ipfilter = ski_ipfilter_hash, j = 0; e_ipfilter != NULL; e_ipfilter=e_ipfilter->hh.next, j++) {
+			if(r == j){ 
+				printf("[SKI] Preemption by eip %d with eip value %x (random entry: %d)\n", i, e_ipfilter->eip, j);
+				eip = e_ipfilter->eip;
+				break;
+			}
+		}
+	
+		// Always create a new entry:
+		printf("[SKI] Create new entry\n");
+		e_by_eip  = calloc(1,sizeof(ski_preeemption_by_eip_entry));
+		e_by_eip->eip = eip;
+		
+		DL_APPEND(ski_preeemption_by_eip, e_by_eip);
+	}
+	
+	printf("[SKI] ski_preemption_by_eip_init() finished\n");
+}
+*/
+
+#else
+void ski_ipfilter_loadfile_ranges(char *ipfilter_filename){
+    int i;
+    char comment_chr = '#';
+	FILE *f;
+    
+	ski_init_ipfilter_ranges_count=0;
+
+    if (!strlen(ipfilter_filename) || !(f = fopen(ipfilter_filename,"r"))){
+        printf("[SKI] Error: Not able to load the file %s (RANGES, SLOW!)\n", ipfilter_filename);
+		assert(0);
+    }
+
+    printf("[SKI] Reading the ip filter file: %s\n", ipfilter_filename);
+    for(i=0;i<MAX_SKI_IPFILTER_RANGES;i++){
+        int start, end;
+        char buffer[128];
+        char *res_str;
+        int res;
+        buffer[0]=0;
+
+        res_str = fgets(buffer,128-1,f);
+        if(res_str ==0){
+            printf("[SKI] Finished reading the ip filter file\n");
+			// Success
+			fclose(f);
+            return;
+        }
+        char *comment_pos;
+        comment_pos = strchr(buffer, comment_chr);
+		if (comment_pos){
+            *comment_pos = 0;
+        }
+
+        res = sscanf(res_str,"%x %x", &start, &end);
+        ski_ipfilter_range* r = &ski_init_ipfilter_ranges[i];
+        //printf("[SKI] start: %d end: %d res: %d\n", start,end,res);
+        if(res == 1){
+            r->start = start;
+            r->end = start;
+            ski_init_ipfilter_ranges_count++;
+        }else if(res == 2){
+            assert(start <= end);
+            r->start = start;
+            r->end = end;
+            ski_init_ipfilter_ranges_count++;
+        }else{
+            printf("[SKI] Error: Unable to process the ip filter (sscanf)\n");
+            perror("error: ");
+            assert(0);
+        }
+        //printf("[SKI] Added ip filter range: %x - %x\n", r->start, r->end);
+    }
+    printf("[SKI] Error: Ip filter file reached the maximum number of entries (MAX_SKI_IPFILTER_RANGES = %d)\n",MAX_SKI_IPFILTER_RANGES);
+	assert(0);
+	return;
+}
+#endif
+
+
+void ski_forkall_init_random(){
+	printf("[SKI] Changing the random seed to %d in ski_forkall_init_random()\n", ski_init_options_seed);
+	srandom(ski_init_options_seed); 
+	ski_stats_add_seed(ski_init_options_seed);
+}
+
+// Based on the code of to handle "preemptions" in ski_parse() and on execute_qemu_setup_preemptionlist() from run-ski.c
+void ski_forkall_init_preemptionlist(){
+    int i;
+	
+	ski_init_options_preemptions_len = ski_init_options_forkall_preemption_points;
+	assert(ski_init_options_preemptions_len < SKI_MAX_PREEMPTION_POINTS);
+
+	printf("[SKI] ski_forkall_init_preemptionlist: Creating preemption list (ski_init_options_forkall_k = %d)\n", ski_init_options_forkall_k);
+	for(i=0; i<ski_init_options_preemptions_len; i++){
+		long long r = ((((random() * 1000LL) ^ random()) * 1000LL) ^ random()); 
+		int point = (r % ski_init_options_forkall_k) + 1;
+		printf("[SKI] Forkall random number: %lld\n", r);
+		printf("[SKI] Forkall preemption point: %d\n", point);
+		assert(point > 0);
+		ski_init_options_preemptions[i] = point;
+	}
+	printf("[SKI] Forkall number of preemption points: %d\n", ski_init_options_preemptions_len);
+}
+
+
+// SKI global options
+static void ski_parse(const char *optarg)
+{
+    int nr_cpus, max_instructions;
+    char *endptr;
+    char option[1024];
+
+	printf("[SKI] Raw ski options: %s\n", optarg);
+
+    ski_init_options_nr_cpus = strtoul(optarg, &endptr, 10);
+    if (endptr != optarg) {
+        if (*endptr == ',') {
+            endptr++;
+        }
+    }
+	/*
+	if (get_param_value(option, 1024, "preemptions", endptr) != 0){
+        char *f;
+		int i = 0; 
+        //ski_init_options_max_instructions = strtoull(option, NULL, 10);
+        for (f = strtok(option, ":"); f; f = strtok(NULL, ":")) {
+			int point = -1;
+			int ret = sscanf(f, "%d", &point);
+			assert(ret == 1);
+			assert(i < SKI_MAX_PREEMPTION_POINTS);
+            printf("[SKI] Preemption point: %d\n", point);
+			ski_init_options_preemptions[i] = point;
+			i++;
+        }
+		ski_init_options_preemptions_len = i;
+    }
+    */
+
+	/* XXX: REMOVE
+    if (get_param_value(option, 256, "prioritiesfile", endptr) != 0){
+        ski_init_options_priorities_filename = strndup(option,256-1);
+    }
+	if (get_param_value(option, 256, "ipfilterfile", endptr) != 0){
+        ski_init_options_ipfilter_filename = strndup(option,256-1);
+    }
+	*/
+	/*
+	if (get_param_value(option, 256, "tracedir", endptr) != 0){
+        ski_init_options_tracedir = strndup(option,256-1);
+	}*/
+	/*if (get_param_value(option, 256, "quit", endptr) != 0){
+		if(strcmp(option,"on")==0){
+			ski_init_options_quit = 1;
+		}else if(strcmp(option,"off")==0){
+			ski_init_options_quit = 0;
+		}else{
+			assert(0);
+		}
+	}
+	*/
+	/*
+	if (get_param_value(option, 256, "preemptionmode", endptr) != 0){
+		if(strcasecmp(option,"cpu")==0){
+			ski_init_options_preemption_mode = SKI_PREEMPTION_MODE_CPU;
+			printf("[SKI] Preemption mode = CPU\n");
+		}else if(strcasecmp(option,"all")==0){
+			ski_init_options_preemption_mode = SKI_PREEMPTION_MODE_ALL;
+			printf("[SKI] Preemption mode = ALL\n");
+		}else if(strcasecmp(option,"cpu_and_nontimer")==0){
+			ski_init_options_preemption_mode = SKI_PREEMPTION_MODE_CPU_AND_NONTIMER;
+			printf("[SKI] Preemption mode = CPU_AND_NONTIMER\n");
+		}else{
+			printf("[SKI] ERROR: preemptionmode parameter only accepts values: 'all',  'cpu_and_nontimer' and 'cpu'\n");
+			assert(0);
+		}
+	}
+   */
+   /*
+    if (get_param_value(option, 1024, "input_number", endptr) != 0){
+        char *f;
+        int i = 0;
+        //ski_init_options_max_instructions = strtoull(option, NULL, 10);
+        for (f = strtok(option, ":"); f; f = strtok(NULL, ":")) {
+            int number = -1;
+            int ret = sscanf(f, "%d", &number);
+            assert(ret == 1);
+            assert(i < SKI_CPUS_MAX);
+            printf("[SKI] Input number [%d]: %d\n", i, number);
+            ski_init_options_input_number[i] = number;
+            i++;
+        }
+        ski_init_options_preemptions_len = i;
+    }
+   */
+    /* XXX: REMOVE
+	if (get_param_value(option, 256, "forkall_rounds", endptr) != 0){
+		// XXX: Disable this for now! (Take the value from the ski_input functions)
+		//int ret = sscanf(option, "%d", &ski_init_options_forkall_rounds);
+		//assert(ret == 1);
+		//assert(ski_init_options_forkall_rounds > 0);
+		ski_forkall_enabled = 1;
+	}
+	*/
+
+
+    /* XXX: REMOVE
+    if (get_param_value(option, 256, "forkall_concurrency", endptr) != 0){
+		int ret = sscanf(option, "%d", &ski_init_options_forkall_concurrency);
+		assert(ret == 1);
+		assert(ski_init_options_forkall_concurrency > 0);
+		assert(ski_init_options_forkall_concurrency < 50);
+		assert(ski_init_options_forkall_rounds > 0);
+	}
+    */
+
+	/*if (get_param_value(option, 256, "forkall_preemption_points", endptr) != 0){
+		int ret = sscanf(option, "%d", &ski_init_options_forkall_preemption_points);
+	}else{
+		assert(ski_forkall_enabled==0);
+	}
+	*/
+/*
+	if (get_param_value(option, 256, "forkall_k", endptr) != 0){
+		int ret = sscanf(option, "%d", &ski_init_options_forkall_k_initial);
+		ski_init_options_forkall_k = ski_init_options_forkall_k_initial;
+	}else{
+		assert(ski_forkall_enabled==0);
+	}
+*/
+
+/*    if (get_param_value(option, 256, "quit_threshold", endptr) != 0){
+		int ret = sscanf(option, "%d", &ski_init_options_quit_threshold);
+		assert(ret == 1);
+	}
+*/
+/*
+	if (get_param_value(option, 256, "preemption_by_eip", endptr) != 0){
+		if(strcmp(option,"on")==0){
+			ski_init_options_preemption_by_eip = 1;
+			printf("ERROR: OBSOLETE!!\n");	//XXX: Not sure forkall and the new space exploration method works well with this for now
+			assert(0);
+		}else if(strcmp(option,"off")==0){
+			ski_init_options_preemption_by_eip = 0;
+		}else{
+			assert(0);
+		}
+	}
+*/
+
+/* XXX: Probably obsolete too 
+   TODO: remove the code that it affects?
+	if (get_param_value(option, 256, "fast_resume", endptr) != 0){
+		if(strcmp(option,"on")==0){
+			ski_init_options_fast_resume=1;
+		}else if(strcmp(option,"off")==0){
+			ski_init_options_fast_resume=0;
+		}else{
+			assert(0);
+		}
+	}
+*/
+
+/*  if (get_param_value(option, 256, "seed", endptr) != 0){
+		int ret = sscanf(option, "%d", &ski_init_options_seed);
+		assert(ret == 1);
+	}
+*/
+
+	assert(ski_init_options_nr_cpus == 0);	// NYI
+//	assert(ski_init_options_seed > 0);
+/*	printf("[SKI] Read global options: cpus=%d, ski_init_options_preemptions_len=%d, ski_init_options_preemption_mode=%d, ski_init_options_priorities_filename=%s, ski_init_options_ipfilter_filename=%s, seed=%d\n", 
+    	ski_init_options_nr_cpus, ski_init_options_preemptions_len, ski_init_options_preemption_mode,   
+		(ski_init_options_priorities_filename ? ski_init_options_priorities_filename : "NULL"),
+		(ski_init_options_ipfilter_filename ? ski_init_options_ipfilter_filename : "NULL"), 
+		ski_init_options_seed);
+	printf("[SKI] Read global forkall options: forkall_rounds=%d, forkall_concurrency=%d\n", ski_init_options_forkall_rounds, ski_init_options_forkall_concurrency);
+*/	
+}
+
+// SKI per-CPU options
+static void ski_cpu_parse(const char *optarg)
+{
+	//
+	//  NOT IMPLEMENTED FOR NOW 
+	//
+    int cpu_index, max_instructions;
+    char *endptr;
+    char option[128];
+
+    cpu_index = strtoul(optarg, &endptr, 10);
+    if (endptr != optarg) {
+        if (*endptr == ',') {
+            endptr++;
+        }
+    }
+    if (get_param_value(option, 128, "max_instructions", endptr) != 0)
+        max_instructions = strtoull(option, NULL, 10);
+	
+	printf("[SKI] Read per-CPU options: SKI_CPU index=%d, max_instructions=%d\n",cpu_index, max_instructions);
+	printf("[SKI] Not implemented!");
+	assert(0);
+}
+
+
+static int ski_sha_file(char *filename, char*dest_str){
+	FILE *fp;
+	
+	dest_str[0] = 0;
+
+	if(filename && (fp = fopen(filename, "r"))){
+		//printf("filename: %s\n", filename);
+		int res, i;
+		char *buffer;
+	    SHA1_CTX ctx;
+		unsigned char hash[20];
+		int total_bytes = 0;
+
+		buffer = malloc(SKI_HASH_BUFFER_SIZE);
+		assert(buffer);
+
+		SHA1Init(&ctx);
+		while(1){
+			res = fread(buffer,1, MIN(SKI_HASH_BUFFER_SIZE, SKI_HASH_READ_MAX - total_bytes),fp);
+			//printf("reading %d bytes\n", res);
+			
+			if(res<=0){
+				break;
+			}
+			total_bytes += res;
+			SHA1Update(&ctx, buffer, res);
+		}
+		SHA1Final(hash, &ctx);
+
+		//printf("SHA1=");
+	    for(i=0;i<20;i++)
+	        sprintf(dest_str + (i*2),"%02x", hash[i]);
+    	//printf("\n");
+		//printf("total_bytes: %d\n", total_bytes);
+		free(buffer);
+		fclose(fp);
+		return total_bytes;
+	}
+	return 0;
+}
+
+static void ski_hash_kernel(char *kernel_filename){
+	if(kernel_filename){
+		printf("[SKI] Hashing kernel_filename: %s\n", kernel_filename);
+		strcpy(ski_init_kernel_filename,kernel_filename);
+		ski_init_kernel_size = ski_sha_file(kernel_filename, ski_init_kernel_sha1);
+		printf("[SKI] Finished hashing (hash : %s)\n", ski_init_kernel_sha1);
+	}else{
+		printf("[SKI] Hashing not hashing kernel\n" );
+		ski_init_kernel_filename[0] = 0;
+		ski_init_kernel_sha1[0] = 0;
+		ski_init_kernel_size = -1;
+	}
+}
+
+static void ski_hash_disk(char *disk_filename){
+	if(disk_filename){
+		printf("[SKI] Hashing disk_filename: %s\n", disk_filename);
+		strcpy(ski_init_disk_filename,disk_filename);
+		ski_init_disk_size = ski_sha_file(disk_filename, ski_init_disk_sha1);
+		printf("[SKI] Finished hashing (hash: %s)\n", ski_init_disk_sha1);
+	}else{
+		printf("[SKI] Hashing not hashing disk\n" );
+		ski_init_disk_filename[0] = 0;
+		ski_init_disk_sha1[0] = 0;
+		ski_init_disk_size = -1;
+	}
+}
+
+static void ski_input_number_initialize(){
+	int i;
+	printf("[SKI] ski_init_options_input_number:\n");
+	for(i=0;i<SKI_CPUS_MAX;i++){
+		ski_init_options_input_number[i] = 0;
+	}
+}
+
+int ski_timeval_subtract(struct timeval *result, struct timeval *t2, struct timeval *t1)
+{
+    long int diff = (t2->tv_usec + 1000000 * t2->tv_sec) - (t1->tv_usec + 1000000 * t1->tv_sec);
+    result->tv_sec = diff / 1000000;
+    result->tv_usec = diff % 1000000;
+    return (diff<0);
+}
+
+
 
 /***********************************************************/
 /* USB devices */
@@ -2149,6 +2793,401 @@ static void free_and_trace(gpointer mem)
     free(mem);
 }
 
+
+/* Default to cache=writeback as data integrity is not important for qemu-tcg. */
+#define BDRV_O_FLAGS BDRV_O_CACHE_WB
+
+
+static BlockDriverState *ski_bdrv_new_open(const char *filename,
+                                       const char *fmt,
+                                       int flags)
+{
+    BlockDriverState *bs;
+    BlockDriver *drv;
+    char password[256];
+    int ret;
+
+    bs = bdrv_new("image");
+
+    if (fmt) {
+        drv = bdrv_find_format(fmt);
+        if (!drv) {
+            error_report("Unknown file format '%s'", fmt);
+            goto fail;
+        }  
+    } else {
+        drv = NULL;
+    }
+
+    ret = bdrv_open(bs, filename, flags, drv);
+    if (ret < 0) {
+        error_report("Could not open '%s': %s", filename, strerror(-ret));
+        goto fail;
+    }
+
+    if (bdrv_is_encrypted(bs)) {
+		assert(0);
+    }
+    return bs;
+fail:
+    if (bs) {
+        bdrv_delete(bs);
+    }
+    return NULL;
+}
+
+
+void ski_coredump_enable(void)
+{
+    struct rlimit corelim;
+
+    corelim.rlim_cur = 0;
+    corelim.rlim_max = 0;
+
+    //corelim.rlim_cur = -1;
+    //corelim.rlim_max = -1;
+	// TODO: Make an input parameter to enable/disable this
+
+    if (setrlimit(RLIMIT_CORE, &corelim) != 0)
+    {
+        printf("[SKI] ERROR: Couldn't set core limit\n");
+    }
+}
+
+
+static void ski_dump_snapshots(BlockDriverState *bs)
+{   
+    QEMUSnapshotInfo *sn_tab, *sn;
+    int nb_sns, i;
+    char buf[256];
+
+    nb_sns = bdrv_snapshot_list(bs, &sn_tab);
+    if (nb_sns <= 0)
+        return;
+    printf("Snapshot list:\n");
+    printf("%s\n", bdrv_snapshot_dump(buf, sizeof(buf), NULL));
+    for(i = 0; i < nb_sns; i++) {
+        sn = &sn_tab[i];
+        printf("%s\n", bdrv_snapshot_dump(buf, sizeof(buf), sn));
+		sprintf(ski_snapshot_name_auto, "%s", sn->name);
+    }
+    g_free(sn_tab);
+}
+
+
+void ski_get_snapshot(char *filename)
+{
+    int c;
+	char *fmt = 0;
+    //const char *filename, *fmt;
+    BlockDriverState *bs;
+    char fmt_name[128], size_buf[128], dsize_buf[128];
+    uint64_t total_sectors;
+    int64_t allocated_size;
+    char backing_filename[1024];
+    char backing_filename2[1024];
+    BlockDriverInfo bdi;
+
+    /* Parse commandline parameters */
+    fmt = NULL;
+    fmt = "qcow2";
+    bs = ski_bdrv_new_open(filename, fmt, BDRV_O_FLAGS | BDRV_O_NO_BACKING);
+    if (!bs) {
+		printf("ERROR: ski_get_snapshot unable to open the file!\n");
+        return ;
+    }
+    bdrv_get_format(bs, fmt_name, sizeof(fmt_name));
+    bdrv_get_geometry(bs, &total_sectors);
+    get_human_readable_size(size_buf, sizeof(size_buf), total_sectors * 512);
+    allocated_size = bdrv_get_allocated_file_size(bs);
+    if (allocated_size < 0) {
+        snprintf(dsize_buf, sizeof(dsize_buf), "unavailable");
+    } else {
+        get_human_readable_size(dsize_buf, sizeof(dsize_buf),
+                                allocated_size);
+    }
+    printf("image: %s\n"
+           "file format: %s\n"
+           "virtual size: %s (%" PRId64 " bytes)\n"
+           "disk size: %s\n",
+           filename, fmt_name, size_buf,
+           (total_sectors * 512),
+           dsize_buf);
+    if (bdrv_is_encrypted(bs)) {
+        printf("encrypted: yes\n");
+    }
+    if (bdrv_get_info(bs, &bdi) >= 0) {
+        if (bdi.cluster_size != 0) {
+            printf("cluster_size: %d\n", bdi.cluster_size);
+        }
+    }
+    bdrv_get_backing_filename(bs, backing_filename, sizeof(backing_filename));
+    if (backing_filename[0] != '\0') {
+        path_combine(backing_filename2, sizeof(backing_filename2),
+                     filename, backing_filename);
+        printf("backing file: %s (actual path: %s)\n",
+               backing_filename,
+               backing_filename2);
+    }
+    ski_dump_snapshots(bs);
+	bdrv_delete(bs);
+}
+
+
+// Function is supposed to be called from the parent process
+// Thus should not use the hashes created by the child process 
+void ski_eipfilter_add_stats(ski_stats *stats){
+    int i;
+
+    for(i=0;i<stats->communication_instructions_n;i++){
+        ski_ipfilter_hash_entry* entry;
+        int eip = stats->communication_instructions[i].eip_address;
+
+        HASH_FIND_INT(ski_ipfilter_hash, &eip, entry);
+                        
+        if(entry == 0){ 
+            assert(ski_ipfilter_hash_values_n<MAX_IPFILTER_HASH);
+            entry = &ski_ipfilter_hash_values[ski_ipfilter_hash_values_n];
+            ski_ipfilter_hash_values_n++;
+                        
+            entry->eip = eip;
+            HASH_ADD_INT(ski_ipfilter_hash, eip, entry);
+            //SKI_INFO_NOCPU("[SKI] Added ip filter: %x\n", entry->eip);
+        }               
+    }
+	printf("[SKI] Tried to add the communication points from the slot (%d). Now have %d communications points\n", stats->communication_instructions_n, ski_ipfilter_hash_values_n);
+}       
+
+void ski_forkall_parent_wait(int child_pid, int *concurrency_slots_available, int *stats_next_slot){
+	int wait_status;
+	int wait_pid;
+
+	// Parent
+	printf("[SKI] [FORKALL] [PARENT] Parent process (forked child_pid %d)\n", child_pid);
+
+	//gettimeofday(&tvEnd, NULL);
+	//ski_forkall_timeval_subtract(&tvDiff, &tvEnd, &tvBegin);
+	//printf("[SKI] [FORKALL] [PARENT] Time diff fork->parent_wait: %ld.%06ld (time start: %ld.%06ld time end: %ld.%06ld)\n", tvDiff.tv_sec, tvDiff.tv_usec, tvBegin.tv_sec, tvBegin.tv_usec, tvEnd.tv_sec, tvEnd.tv_usec);
+
+	ski_stats_get_self()->pid = child_pid;
+
+	if(*concurrency_slots_available > 0){
+		(*concurrency_slots_available)--;
+	}
+
+	if(*concurrency_slots_available==0){
+		wait_pid = wait(&wait_status);
+		if(wait_status == -1){
+			perror("waitpid");
+			exit(EXIT_FAILURE);
+		}
+
+
+		if(WIFSIGNALED(wait_status) ){
+			int sig = WTERMSIG(wait_status);
+			printf("ERROR: signal received: %d\n", sig);
+			printf("Exiting\n");
+			exit(0);
+		}
+
+		if(wait_pid==-1){
+			printf("ERROR: Wait_pid == -1. Something went wrong with the child process.\n");
+			printf("ERROR: errno: %d errno msg: %s\n", errno, strerror(errno));
+			if(errno){
+				printf("Exiting\n");
+				exit(0);
+			}else{
+				printf("ERROR: hanging...\n");
+				while(1){
+					sleep(1);
+				}
+			}
+		}
+		//assert(wait_pid!=-1);
+
+		ski_stats * last_stats = ski_stats_get_from_pid(wait_pid);
+		*stats_next_slot = last_stats->slot;
+		printf("[SKI] [FORKALL] [PARENT] Pid %d finished (wait_status = %d, exit code = %d, stats slot = %d)\n", wait_pid, wait_status, WEXITSTATUS(wait_status), *stats_next_slot);
+
+		SKI_ASSERT_MSG(WEXITSTATUS(wait_status)!=0, SKI_EXIT_OTHER, "Child process returned some strange error (did it sigsegv? Check if there is a coredump file)");
+
+
+		ski_stats_set_self_slot(*stats_next_slot);
+		ski_stats_finish();
+		ski_eipfilter_add_stats(last_stats);
+		ski_control_parameters_print(last_stats);
+		ski_rd_print(last_stats);
+		ski_id_print(last_stats);
+		ski_md_print(last_stats);
+
+		// Learn k from the previous execution 
+		if(last_stats->preemption_points_executed>0){
+			ski_init_options_forkall_k = last_stats->preemption_points_executed * 1.1;	
+		}else{
+			// otherwise keep the same value
+		}
+
+		printf("[SKI] [FORKALL] [PARENT] Using ski_init_options_forkall_k %d for next child process (last_stats->preemption_points_executed = %d)\n", ski_init_options_forkall_k, last_stats->preemption_points_executed);
+
+		ski_stats_reset_slot(*stats_next_slot);
+	}else{
+		(*stats_next_slot)++;
+		ski_stats_set_self_slot(*stats_next_slot);
+	}
+
+
+	ski_forkall_round++;	
+	
+	if(ski_forkall_round>= ski_init_options_forkall_rounds){
+		printf("[SKI] [FORKALL] [PARENT] Finished %d rounds. Hanging! (wait_status = %d, exit code = %d, wait_pid = %d)\n", ski_forkall_round, wait_status, WEXITSTATUS(wait_status), wait_pid);
+		
+		int concurrency_slots_in_use = ski_init_options_forkall_concurrency - (*concurrency_slots_available) - 1;
+		while(concurrency_slots_in_use){
+			int wait_pid;
+			wait_pid = wait(&wait_status);
+			concurrency_slots_in_use--;
+
+			ski_stats * last_stats = ski_stats_get_from_pid(wait_pid);
+			*stats_next_slot = last_stats->slot;
+			printf("[SKI] [FORKALL] [PARENT] Pid %d finished (wait_status %d, stats slot = %d)\n", wait_pid, wait_status, *stats_next_slot);
+
+			ski_stats_set_self_slot(*stats_next_slot);
+			ski_stats_finish();
+			ski_eipfilter_add_stats(last_stats);
+			ski_control_parameters_print(last_stats);
+			ski_rd_print(last_stats);
+			ski_id_print(last_stats);
+			ski_md_print(last_stats);
+		}
+		printf("[SKI] [FORKALL] [PARENT] All the forkall tests finished\n");
+		exit(0);
+		
+		// OR Hang					
+		/*while(1){
+			printf("[SKI] [FORKALL] [PARENT] All tests done. Parent process exiting...\n");
+			sleep(1);
+		}*/
+		
+	}
+
+}
+
+void ski_forkall_debug_parent_execute_init()
+{
+
+	if(ski_init_options_debug_child_wait_start_seconds){
+		printf("SLEEPING on request %d seconds\n", ski_init_options_debug_child_wait_start_seconds);
+		sleep(ski_init_options_debug_child_wait_start_seconds);
+	}
+
+	printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] =========================================================\n");
+
+	if(ski_init_options_watchdog_seconds){
+		ski_watchdog_init(ski_init_options_watchdog_seconds);
+	}
+
+	char console_filename[1024];
+	sprintf(console_filename, "%s/console_%s_%d_%d_%d.txt",
+			ski_init_options_destination_dir,
+			ski_init_execution_ts,
+			ski_init_options_input_number[0], ski_init_options_input_number[1], ski_init_options_seed);
+	ski_exec_redirect_to_null(console_filename);
+	ski_serial_replace_file(console_filename);
+
+	ski_run_trace_start();
+	ski_st_trace_start();
+
+	printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] Child process re-acquiring the lock\n");
+
+	ski_forkall_aquire_locks();
+
+
+	printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] Reinitializing the alarms...\n");
+	
+	if (ski_forkall_reinit_timer_alarm() < 0) {
+		fprintf(stderr, "could not initialize alarm timer\n");
+		exit(1);
+	}
+	
+
+	printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] Reinitializing main loop (eventfds, etc.).\n");
+	qemu_mutex_unlock_iothread();
+	if (qemu_init_main_loop()) {
+		fprintf(stderr, "qemu_init_main_loop failed\n");
+		exit(1);
+	}
+
+
+
+	printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] Reinitializing posix AIO (pipe2)...\n");
+	ski_paio_reset();
+
+	printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] Executing test.\n");
+
+	return;
+}
+
+
+void ski_forkall_child_init()
+{
+
+	if(ski_init_options_debug_child_wait_start_seconds){
+		printf("SLEEPING on request %d seconds\n", ski_init_options_debug_child_wait_start_seconds);
+		sleep(ski_init_options_debug_child_wait_start_seconds);
+	}
+
+	printf("[SKI] [FORKALL] [CHILD] =========================================================\n");
+	printf("[SKI] [FORKALL] [CHILD] New child process!!\n");
+
+	if(ski_init_options_watchdog_seconds){
+		ski_watchdog_init(ski_init_options_watchdog_seconds);
+	}
+
+	char console_filename[1024];
+	sprintf(console_filename, "%s/console_%s_%d_%d_%d.txt",
+			ski_init_options_destination_dir,
+			ski_init_execution_ts,
+			ski_init_options_input_number[0], ski_init_options_input_number[1], ski_init_options_seed);
+	ski_exec_redirect_to_null(console_filename);
+	ski_serial_replace_file(console_filename);
+
+	ski_run_trace_start();
+	ski_st_trace_start();
+
+	//printf("[SKI] [FORKALL] [CHILD] Child reinit_qemu_init_cpu_loop\n");
+	ski_forkall_reinit_qemu_init_cpu_loop();
+
+	//printf("[SKI] [FORKALL] [CHILD] Child process re-acquiring the lock\n");
+	ski_forkall_aquire_locks();
+
+/*	printf("[SKI] [FORKALL] [CHILD] Stoping existing alarms...\n");
+	ski_forkall_quit_timers();
+*/
+	//printf("[SKI] [FORKALL] [CHILD] Reinitializing main loop (eventfds, etc.).\n");
+	qemu_mutex_unlock_iothread();
+	if (qemu_init_main_loop()) {
+		fprintf(stderr, "qemu_init_main_loop failed\n");
+		exit(1);
+	}
+
+	//printf("[SKI] [FORKALL] [CHILD] Reinitializing the alarms...\n");
+	if (ski_forkall_reinit_timer_alarm() < 0) {
+		fprintf(stderr, "could not initialize alarm timer\n");
+		exit(1);
+	}
+
+	//printf("[SKI] [FORKALL] [CHILD] Reinitializing posix AIO (pipe2)...\n");
+	ski_paio_reset();
+	
+	//printf("[SKI] [FORKALL] [CHILD] Releasing locks...\n");
+	//ski_forkall_release_locks();
+
+	printf("[SKI] [FORKALL] [CHILD] Executing test.\n");
+
+	return;
+}
+
+
 int main(int argc, char **argv, char **envp)
 {
     const char *gdbstub_dev = NULL;
@@ -2184,7 +3223,44 @@ int main(int argc, char **argv, char **envp)
     const char *trace_events = NULL;
     const char *trace_file = NULL;
 
+	// SKI:
+	char ski_disk_filename[1024];
+	ski_disk_filename[0] = 0;
+	ski_snapshot_name_auto[0] = 0;
+
+	stark_run_trace_init();	// Initializes a variable used by logging functions
+
+	/* SKI */
+	//printf("Issuing an int 03 to trigger a gdb trap (GDP needs to be attached)!!\n");
+	//__asm__ ( "int $0x3;" );	
+
+	//printf("Sleeping for 30 seconds more\n");
+	//sleep(30);
+
+	//printf("[SKI] Disabling the gprof\n");
+	//moncontrol(0);
+
+	printf("[SKI] QEMU launched.\n");
+
+	char* ski_start_sleep_enabled = getenv("SKI_DEBUG_START_SLEEP_ENABLED");
+	int ski_start_sleep_seconds = 1;
+	if(ski_start_sleep_enabled && 
+		(sscanf(ski_start_sleep_enabled,"%d",&ski_start_sleep_seconds)==1) && 
+		(ski_start_sleep_seconds >= 1)){
+
+		//&& (strcmp(ski_start_sleep_enabled,"1") == 0)){
+		printf("[SKI] Sleeping for %d seconds (SKI_DEBUG_START_SLEEP_ENABLED >= 1)\n", ski_start_sleep_seconds);
+		sleep(ski_start_sleep_seconds);
+		setvbuf (stdout, NULL, _IONBF, BUFSIZ);
+	}else{
+		printf("[SKI] Not sleeping for 10 seconds (ski_start_sleep_enabled=%s)\n", ski_start_sleep_enabled?ski_start_sleep_enabled:"NULL");
+	}
+	
+	ski_init_options_forkall_rounds = ski_input_init();
+	
+
     atexit(qemu_run_exit_notifiers);
+
     error_set_progname(argv[0]);
 
     g_mem_set_vtable(&mem_trace);
@@ -2222,6 +3298,8 @@ int main(int argc, char **argv, char **envp)
     nb_nics = 0;
 
     autostart= 1;
+
+	ski_input_number_initialize();
 
     /* first pass of option parsing */
     optind = 1;
@@ -2301,6 +3379,8 @@ int main(int argc, char **argv, char **envp)
                                  ",trans=lba" :
                                  translation == BIOS_ATA_TRANSLATION_NONE ?
                                  ",trans=none" : "");
+					ski_hash_disk(optarg);
+					strcpy(ski_disk_filename, optarg);
                     drive_add(IF_DEFAULT, 0, optarg, buf);
                     break;
                 }
@@ -2871,7 +3951,13 @@ int main(int argc, char **argv, char **envp)
                     exit(1);
                 }
                 break;
-	    case QEMU_OPTION_vnc:
+			case QEMU_OPTION_skicpu:
+				ski_cpu_parse(optarg);
+				break;
+			case QEMU_OPTION_ski:
+				ski_parse(optarg);
+				break;
+		    case QEMU_OPTION_vnc:
 #ifdef CONFIG_VNC
                 display_remote++;
                 vnc_display = optarg;
@@ -3064,6 +4150,25 @@ int main(int argc, char **argv, char **envp)
     }
     loc_set_none();
 
+	printf("[SKI] QEMU parameters parsed\n");
+	/* PF SKI: Initialize the forkall mechanism (should be called before forkall_slave or forkall_master */
+	ski_forkall_initialize();
+
+	if(ski_forkall_enabled){
+		ski_control_forkall_trace_start();
+	}
+
+	ski_coredump_enable();
+
+	if(ski_init_options_ipfilter_filename[0]!=0){
+#ifdef SKI_IPFILTER_HASH
+		ski_ipfilter_loadfile_hash(ski_init_options_ipfilter_filename);
+		ski_ipfilter_save();	
+#else
+		ski_ipfilter_loadfile_ranges(ski_init_options_ipfilter_filename);	
+#endif
+	}
+
     /* Open the logfile at this point, if necessary. We can't open the logfile
      * when encountering either of the logging options (-d or -D) because the
      * other one may be encountered later on the command line, changing the
@@ -3210,11 +4315,15 @@ int main(int argc, char **argv, char **envp)
     configure_accelerator();
 
     qemu_init_cpu_loop();
-    if (qemu_init_main_loop()) {
+    
+	if (qemu_init_main_loop()) {
         fprintf(stderr, "qemu_init_main_loop failed\n");
         exit(1);
     }
+	
     linux_boot = (kernel_filename != NULL);
+
+	ski_hash_kernel(kernel_filename);
 
     if (!linux_boot && *kernel_cmdline != '\0') {
         fprintf(stderr, "-append only allowed with -kernel option\n");
@@ -3232,7 +4341,6 @@ int main(int argc, char **argv, char **envp)
         fprintf(stderr, "could not initialize alarm timer\n");
         exit(1);
     }
-
     if (icount_option && (kvm_enabled() || xen_enabled())) {
         fprintf(stderr, "-icount is not allowed with kvm or xen\n");
         exit(1);
@@ -3260,6 +4368,10 @@ int main(int argc, char **argv, char **envp)
     bdrv_init_with_whitelist();
 
     blk_mig_init();
+
+	// PF: SKI: XXX: check  whether this could cause problems
+	ski_get_snapshot(ski_disk_filename);
+	
 
     /* open the virtual block devices */
     if (snapshot)
@@ -3448,6 +4560,10 @@ int main(int argc, char **argv, char **envp)
         exit(1);
     }
 
+	if(gdbstub_dev){
+		ski_init_options_gdbstub = 1;
+	}
+
     qdev_machine_creation_done();
 
     if (rom_load_all() != 0) {
@@ -3461,11 +4577,166 @@ int main(int argc, char **argv, char **envp)
     qemu_run_machine_init_done_notifiers();
 
     qemu_system_reset(VMRESET_SILENT);
-    if (loadvm) {
+    
+	// This are the two combinations that work now: 
+    //   a) if generating a snapshot, must disable the forkall optimization
+    //   b) if not generating a snapshot, must enable the forkall optimization
+    assert((loadvm && ski_forkall_enabled) || (!loadvm && !ski_forkall_enabled));
+
+	if (loadvm) {
+		if(ski_init_options_fast_resume){
+			ski_snapshot = 1;
+			printf("[SKI] WARNING: Disabling disk flush! [Final VM disk image/snapshot may become inconsistent]\n");
+		}else{
+			printf("[SKI] Disk flush still enabled (lower performance)\n");
+		}
+
+		if(strlen(ski_snapshot_name_auto)>0){
+			printf("[SKI] Using snapshot name automatically extracted form the VM image (%s vs. %s)\n", loadvm, ski_snapshot_name_auto);
+			sprintf(loadvm, "%s", ski_snapshot_name_auto);
+		}
+		printf("Loading vm: %s\n", loadvm);
+
         if (load_vmstate(loadvm) < 0) {
             autostart = 0;
+			printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+			printf("[SKI] [ERROR] Unable to load the snapshot!! Check that the snapshot name is correct.\n");
+			printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+			fflush(0);
+			sleep(5);
+			assert(0);
         }
-    }
+		
+		printf("[SKI] Finished loading the VM\n");
+
+
+		if(ski_forkall_enabled){
+			int concurrency_slots_available = ski_init_options_forkall_concurrency;  
+			int stats_next_slot = 0;
+
+			ski_stats_init_all(ski_init_options_forkall_concurrency);
+
+			printf("[SKI] Launching %d concurrent processes\n", concurrency_slots_available);
+			printf("[SKI] [FORKALL] Trying to fork process\n");
+			ski_forkall_release_locks();
+			fflush(0);
+
+
+			char* ski_debug_child_start_sleep_seconds = getenv("SKI_DEBUG_CHILD_START_SLEEP_SECONDS");
+			int ski_debug_child_start_sleep_seconds_int = 0;
+			if(ski_debug_child_start_sleep_seconds){
+				if(sscanf(ski_debug_child_start_sleep_seconds, "%d", &ski_debug_child_start_sleep_seconds_int)!=1){
+					ski_debug_child_start_sleep_seconds_int = 0;
+				}
+			}
+
+			// TODO: perhaps print env. information (users/process/memory usage/all the env. variables) before the test begins
+
+forkall_do_fork:			
+			printf("[SKI] Using stats slot %d\n", stats_next_slot);
+			ski_stats_set_self_slot(stats_next_slot);
+
+
+			int new_input = 0;	
+			ski_input_fork_init(&new_input); // interates over the input/interleaving space updating the global variables for the next child
+
+			if(new_input){
+				printf("[SKI] [FORKALL] [PARENT] Reseting the preemption points because we're going to explore new input\n");
+				ski_ipfilter_restore();
+				ski_init_options_forkall_k = ski_init_options_forkall_k_initial; 
+			}
+
+			ski_stats_start();
+			ski_stats_add_preemption_list_size(ski_eipfilter_count_entries());
+
+			fflush(0); // XXX: Necessary to avoid corruption since a child may end up flushing what the parent wrote as well
+			pid_t child_pid = ski_forkall_master(&ski_forkall_wait_firstcpu);
+
+
+			if(child_pid){
+				// ====================================================================================
+				// PARENT PROCESS:
+
+				if(ski_init_options_debug_parent_executes_enabled==0){
+					ski_forkall_parent_wait(child_pid, &concurrency_slots_available, &stats_next_slot);
+					goto forkall_do_fork;
+
+				}else{
+					// Debugging mode, parent does all the work
+					ski_forkall_parent_simulate_child = 1;	// Release the slave threads from the forkall
+					ski_forkall_debug_parent_execute_init();
+				}
+
+			}else{
+				// ====================================================================================
+				// CHILD PROCESS:
+				
+
+				if(ski_init_options_debug_parent_executes_enabled == 0){
+					ski_forkall_child_init();
+				}else{
+					// Debugging mode, child does nothing (waits, but does not die)
+					printf("[SKI] [FORKALL] [DEBUG_PARENT_EXECUTE] Child process does nothing\n");
+					while(1){
+						sleep(2);
+					} 
+				}
+				if(ski_debug_child_start_sleep_seconds_int){
+					printf("[SKI] [DEBUG] Warning: Sleeping for %d seconds (SKI_DEBUG_CHILD_START_SLEEP_SECONDS)\n", ski_debug_child_start_sleep_seconds_int);
+					fflush(0); 
+					sleep(ski_debug_child_start_sleep_seconds_int);
+				}
+			}
+		}
+
+		fflush(0);
+		
+    }else{ // loadvm == false
+		int dummy = 0 ;
+		ski_input_fork_init(&dummy);
+		// Useful to open the file early (so that load-testsuit.sh can find it)
+		ski_msg_trace_start();
+	}
+	
+
+	if(!loadvm && !ski_forkall_enabled){
+		int stats_next_slot = 0;
+		int stats_total_slots = 1;
+
+		ski_stats_init_all(stats_total_slots);
+		printf("[SKI] Using stats slot %d\n", stats_next_slot);
+		ski_stats_set_self_slot(stats_next_slot);
+		ski_stats_start();
+		ski_stats_add_preemption_list_size(ski_eipfilter_count_entries());
+	}
+
+	// This should come after the forkall() because it's seed specific	
+	printf("[SKI] Using seed: %d\n", ski_init_options_seed);
+
+
+	if(loadvm && ski_forkall_enabled){
+		ski_forkall_init_random(); 
+		ski_forkall_init_preemptionlist();
+		ski_stats_input_set_preemptions();
+	}
+
+	/*
+	{
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("[WARNING] [WARNING] EXECUTING MANY SYNC TO SIGNAL THE END OF THE LOADING PHASE\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+		int j;
+		for(j=0;j<10;j++){
+			sync();
+		}
+	}
+	*/
 
     if (incoming) {
         runstate_set(RUN_STATE_INMIGRATE);
@@ -3487,6 +4758,7 @@ int main(int argc, char **argv, char **envp)
     pause_all_vcpus();
     net_cleanup();
     res_free();
+	printf("[SKI] [TRACING] returning\n");
 
     return 0;
 }

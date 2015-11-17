@@ -513,6 +513,8 @@ fail:
  * If the return value is non-negative, it is the new refcount of the cluster.
  * If it is negative, it is -errno and indicates an error.
  */
+extern int ski_snapshot;
+
 static int update_cluster_refcount(BlockDriverState *bs,
                                    int64_t cluster_index,
                                    int addend)
@@ -525,7 +527,10 @@ static int update_cluster_refcount(BlockDriverState *bs,
         return ret;
     }
 
-    bdrv_flush(bs->file);
+	// PF: Disable call on the requester side too..
+	if(!ski_snapshot){
+	    bdrv_flush(bs->file);
+	}
 
     return get_refcount(bs, cluster_index);
 }

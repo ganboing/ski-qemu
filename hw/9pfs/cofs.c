@@ -137,6 +137,10 @@ int v9fs_co_chown(V9fsPDU *pdu, V9fsPath *path, uid_t uid, gid_t gid)
     return err;
 }
 
+// PF: SKI MEMFS
+#undef truncate
+
+
 int v9fs_co_truncate(V9fsPDU *pdu, V9fsPath *path, off_t size)
 {
     int err;

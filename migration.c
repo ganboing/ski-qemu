@@ -325,7 +325,10 @@ static int migrate_fd_close(void *opaque)
         monitor_resume(s->mon);
     }
     qemu_set_fd_handler2(s->fd, NULL, NULL, NULL, NULL);
-    return s->close(s);
+	// PF: SKI MEMFS
+	#undef close
+	return s->close(s);
+	#define close(...) memfs_hook_close(__VA_ARGS__)
 }
 
 void add_migration_state_change_notifier(Notifier *notify)

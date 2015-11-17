@@ -11,6 +11,7 @@
  *
  */
 
+
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <pthread.h>
@@ -20,6 +21,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+#include "forkall-coop.h"
+#include "ski-debug.h"
 
 #include "qemu-queue.h"
 #include "osdep.h"
@@ -61,13 +65,20 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static pthread_t thread_id;
 static pthread_attr_t attr;
-static int max_threads = 64;
+// SKI: Prevent many threads from being created
+static int max_threads = 2;
+//static int max_threads = 64;
 static int cur_threads = 0;
 static int idle_threads = 0;
 static int new_threads = 0;     /* backlog of threads we need to create */
 static int pending_threads = 0; /* threads created but not running yet */
 static QEMUBH *new_thread_bh;
 static QTAILQ_HEAD(, qemu_paiocb) request_list;
+
+int ski_snapshot = 0;
+
+//PF: SKI: Important to disable it because of memfs (we don't support preadv and it's a direct syscall!)
+#undef CONFIG_PREADV
 
 #ifdef CONFIG_PREADV
 static int preadv_present = 1;
@@ -115,7 +126,13 @@ static void cond_signal(pthread_cond_t *cond)
 static void thread_create(pthread_t *thread, pthread_attr_t *attr,
                           void *(*start_routine)(void*), void *arg)
 {
-    int ret = pthread_create(thread, attr, start_routine, arg);
+    int ret;
+	if(ski_forkall_enabled){ 
+		ret = ski_forkall_pthread_create(thread, attr, start_routine, arg);
+	}else{
+		ret = pthread_create(thread, attr, start_routine, arg);
+	}
+
     if (ret) die2(ret, "pthread_create");
 }
 
@@ -142,7 +159,14 @@ static ssize_t handle_aiocb_flush(struct qemu_paiocb *aiocb)
 {
     int ret;
 
-    ret = qemu_fdatasync(aiocb->aio_fildes);
+	if(ski_snapshot==0){
+		// PF: SKI:
+//		printf("handle_aiocb_flush: fdatasync disabled (use the hypercall sync for it)!\n");
+	    //ret = qemu_fdatasync(aiocb->aio_fildes);
+	}else{
+		ret = 0;
+	}
+
     if (ret == -1)
         return -errno;
     return 0;
@@ -311,10 +335,17 @@ static void posix_aio_notify_event(void);
 
 static void *aio_thread(void *unused)
 {
+	if(ski_forkall_enabled){
+	    //ski_forkall_thread_add_self();
+		ski_forkall_thread_add_self_tid();
+	}
     mutex_lock(&lock);
     pending_threads--;
     mutex_unlock(&lock);
     do_spawn_thread();
+	
+	int did_fork = 0;
+	int is_child = 0;
 
     while (1) {
         struct qemu_paiocb *aiocb;
@@ -328,15 +359,65 @@ static void *aio_thread(void *unused)
 
         mutex_lock(&lock);
 
-        while (QTAILQ_EMPTY(&request_list) &&
+
+// ORIG:
+/*		while (QTAILQ_EMPTY(&request_list) &&
                !(ret == ETIMEDOUT)) {
             idle_threads++;
             ret = cond_timedwait(&cond, &lock, &ts);
             idle_threads--;
         }
+*/
 
+// PF: MODIFIED FOR SKI
+
+		while ((QTAILQ_EMPTY(&request_list) &&
+               !(ret == ETIMEDOUT))) {
+            idle_threads++;
+			if(did_fork){
+				// After forking resort to the original code
+				ret = cond_timedwait(&cond, &lock, &ts);
+			}else{
+				// Use busy wait to speed up the IO/snapshoting phase
+				mutex_unlock(&lock);
+				if(ski_forkall_enabled){
+					int j,k;
+					k=2;
+					asm volatile("rep; nop");
+					ski_forkall_slave(&did_fork, &is_child);
+
+					for(j=0;j<50*1000;j++){
+						asm volatile("rep; nop");
+						k=k*k+j;
+					}
+
+					for(j=0;j<500;j++){
+						k=k*k+j;
+					}
+
+				}else{
+					int j,k;
+					k=2;
+					asm volatile("rep; nop");
+
+					for(j=0;j<10;j++){
+						k=k*k+j;
+					}
+				}
+				mutex_lock(&lock);
+			}
+			idle_threads--;
+		}
+// PF: MODIFIED FOR SKI
+
+/* SKI: Commented this because we don't want the thread to disappear
         if (QTAILQ_EMPTY(&request_list))
             break;
+*/
+        if (QTAILQ_EMPTY(&request_list)){
+			mutex_unlock(&lock);
+            continue;
+		}
 
         aiocb = QTAILQ_FIRST(&request_list);
         QTAILQ_REMOVE(&request_list, aiocb, node);
@@ -694,3 +775,31 @@ int paio_init(void)
     posix_aio_state = s;
     return 0;
 }
+
+// PF: SKI: Use by the forkall functionality
+int ski_paio_reset(){
+	assert(posix_aio_state);
+
+    int fds[2];
+    int ret;
+
+    if (qemu_pipe(fds) == -1) {
+        printf("[SKI] Failed to create pipe (ski_paio_reset)\n");
+        assert(0);
+    }
+
+    int res = dup2(fds[0], posix_aio_state->rfd);
+	assert(res == posix_aio_state->rfd);
+
+    res = dup2(fds[1], posix_aio_state->wfd);
+	assert(res == posix_aio_state->wfd);
+
+    fcntl(posix_aio_state->rfd, F_SETFL, O_NONBLOCK);
+    fcntl(posix_aio_state->wfd, F_SETFL, O_NONBLOCK);
+
+	//close(posix_aio_state->rfd);
+	//close(posix_aio_state->wfd);
+
+	printf("[SKI] Aio reset done\n");
+}
+

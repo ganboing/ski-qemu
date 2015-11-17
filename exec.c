@@ -986,7 +986,10 @@ TranslationBlock *tb_gen_code(CPUState *env,
     target_ulong virt_page2;
     int code_gen_size;
 
-    phys_pc = get_page_addr_code(env, pc);
+	// SKI
+    //printf("tb_gen_code pc: %d cs_base: %d flags: %d cflags: %d\n", pc, cs_base, flags, cflags);
+
+	phys_pc = get_page_addr_code(env, pc);
     tb = tb_alloc(pc);
     if (!tb) {
         /* flush must be done */

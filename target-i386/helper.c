@@ -860,6 +860,8 @@ int cpu_x86_handle_mmu_fault(CPUX86State *env, target_ulong addr,
     }
     env->error_code = error_code;
     env->exception_index = EXCP0E_PAGE;
+	SKI_TRACE("Page fault generated: [CR3: %d, EAX: %d, EIP: 0x%x (%d), CS: 0x%x (%d)]\n", env->cr[3], env->regs[R_EAX], env->eip, env->eip, env->segs[R_CS], env->segs[R_CS]);
+	
     return 1;
 }
 

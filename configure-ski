@@ -1,0 +1,3 @@
+#!/bin/sh
+
+./configure --prefix=$PWD/../vmm-install --disable-strip --target-list="i386-softmmu" --disable-pie --disable-smartcard

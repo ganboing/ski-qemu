@@ -80,6 +80,31 @@ given, the total number of CPUs @var{n} can be omitted. @var{maxcpus}
 specifies the maximum number of hotpluggable CPUs.
 ETEXI
 
+DEF("ski_cpu", HAS_ARG, QEMU_OPTION_skicpu,
+"-ski_cpu n[,preemptions=i[:j[...]]]\n"
+"                SKI per-CPU settings: NOT IMPLEMENTED\n"
+"                NOT IMPLEMENTED\n",
+QEMU_ARCH_ALL)
+STEXI
+@item - ski_cpu
+@findex - ski_cpu
+ETEXI
+
+DEF("ski", HAS_ARG, QEMU_OPTION_ski,
+"-ski cpu[,preemptions=i[:j[...]]][,tracedir=dir][,quit=on][,traps=no]\n"
+"                SKI global settings\n"
+"                cpu = ski cpu number\n"
+"                preemptions = list of ski scheduler parameters specifying the number of instructions till the preeemption points\n"
+"                tracedir = directory name for the execution trace\n"
+"                quit = quits qemu when a certain hypercall is issued\n"
+"                traps = disables traps\n",
+QEMU_ARCH_ALL)
+STEXI
+@item - ski
+@findex - ski
+ETEXI
+
+
 DEF("numa", HAS_ARG, QEMU_OPTION_numa,
     "-numa node[,mem=size][,cpus=cpu[-cpu]][,nodeid=node]\n", QEMU_ARCH_ALL)
 STEXI
@@ -1799,18 +1824,13 @@ QEMU supports using either local sheepdog devices or remote networked
 devices.
 
 Syntax for specifying a sheepdog device
-@table @list
-``sheepdog:<vdiname>''
-
-``sheepdog:<vdiname>:<snapid>''
-
-``sheepdog:<vdiname>:<tag>''
-
-``sheepdog:<host>:<port>:<vdiname>''
-
-``sheepdog:<host>:<port>:<vdiname>:<snapid>''
-
-``sheepdog:<host>:<port>:<vdiname>:<tag>''
+@table @code
+@item sheepdog:<vdiname>
+@item sheepdog:<vdiname>:<snapid>
+@item sheepdog:<vdiname>:<tag>
+@item sheepdog:<host>:<port>:<vdiname>
+@item sheepdog:<host>:<port>:<vdiname>:<snapid>
+@item sheepdog:<host>:<port>:<vdiname>:<tag>
 @end table
 
 Example

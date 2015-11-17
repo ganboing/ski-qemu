@@ -5,6 +5,7 @@
 
 #include "cpu.h"
 #include "kvm.h"
+#include "ski.h"
 
 static const VMStateDescription vmstate_segment = {
     .name = "segment",
@@ -269,6 +270,13 @@ static int cpu_post_load(void *opaque, int version_id)
         hw_breakpoint_insert(env, i);
 
     tlb_flush(env, 1);
+
+
+	// SKI:
+	if(env->ski_active == true){
+		ski_snapshot_restoring = 1;
+	}
+
     return 0;
 }
 
@@ -446,7 +454,42 @@ static const VMStateDescription vmstate_cpu = {
         VMSTATE_UINT64_V(xcr0, CPUState, 12),
         VMSTATE_UINT64_V(xstate_bv, CPUState, 12),
         VMSTATE_YMMH_REGS_VARS(ymmh_regs, CPUState, CPU_NB_REGS, 12),
+
+		/* SKI */
+        VMSTATE_BOOL_V(ski_active, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_cpus, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_max_instr, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.bug_depth, CPUState, 5),
+
+        VMSTATE_INT32_V(ski_cpu.state, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_instr_executed, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_instr_executed_other, CPUState, 5),
+
+        VMSTATE_INT32_V(ski_cpu.priority, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.priority_adjust, CPUState, 5),
+        VMSTATE_BOOL_V(ski_cpu.blocked, CPUState, 5),
+
+        VMSTATE_UINT32_ARRAY_V(ski_cpu.ski_ignore_interrupts, CPUState, 8, 5),
+        
+		VMSTATE_INT32_V(ski_cpu.nr_syscalls_self, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_interrupts_self, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_syscalls_other, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.nr_interrupts_other, CPUState, 5),
+
+        VMSTATE_INT32_V(ski_cpu.cr3, CPUState, 5),
+        VMSTATE_INT32_V(ski_cpu.gdt, CPUState, 5),
+
+        VMSTATE_BOOL_V(ski_cpu.last_enter_cpu, CPUState, 5),
+
+        VMSTATE_BOOL_V(ski_old_stop, CPUState, 5),
+        VMSTATE_BOOL_V(ski_old_stopped, CPUState, 5),
+
+//        VMSTATE_INT32_V(ski_cpu., CPUState, 5),
+        /* SKI END */
+
         VMSTATE_END_OF_LIST()
+
+
         /* The above list is not sorted /wrt version numbers, watch out! */
     },
     .subsections = (VMStateSubsection []) {

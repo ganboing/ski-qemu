@@ -28,6 +28,7 @@
 #include "host-utils.h"
 #include "sysbus.h"
 
+//SKI:
 //#define DEBUG_IOAPIC
 
 #ifdef DEBUG_IOAPIC
@@ -132,6 +133,10 @@ static void ioapic_service(IOAPICState *s)
     }
 }
 
+// PF: SKI
+extern int ski_apic_disable_timer;
+extern int ski_apic_disable_all;
+
 static void ioapic_set_irq(void *opaque, int vector, int level)
 {
     IOAPICState *s = opaque;
@@ -140,7 +145,14 @@ static void ioapic_set_irq(void *opaque, int vector, int level)
      * to GSI 2.  GSI maps to ioapic 1-1.  This is not
      * the cleanest way of doing it but it should work. */
 
-    DPRINTF("%s: %s vec %x\n", __func__, level ? "raise" : "lower", vector);
+    //DPRINTF("%s: %s vec %x\n", __func__, level ? "raise" : "lower", vector);
+
+	// PF: SKI
+//	if(!level  && (ski_apic_disable_all == 1 || (ski_apic_disable_timer==1 && vector==0))){
+		DPRINTF("[SKI] %s: disabling this interrupt\n",__func__);
+//		return;
+//	}
+
     if (vector == 0) {
         vector = 2;
     }

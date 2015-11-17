@@ -17,6 +17,13 @@
 #include "qemu-coroutine.h"
 #include "virtio-9p-coth.h"
 
+
+// PF: SKI MEMFS
+#undef close 
+#undef fstat 
+#undef open 
+#undef truncate
+
 int v9fs_co_st_gen(V9fsPDU *pdu, V9fsPath *path, mode_t st_mode,
                    V9fsStatDotl *v9stat)
 {
@@ -106,6 +113,7 @@ int v9fs_co_open(V9fsPDU *pdu, V9fsFidState *fidp, int flags)
     }
     return err;
 }
+
 
 int v9fs_co_open2(V9fsPDU *pdu, V9fsFidState *fidp, V9fsString *name, gid_t gid,
                   int flags, int mode, struct stat *stbuf)

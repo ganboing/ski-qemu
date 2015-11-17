@@ -30,6 +30,11 @@
 #include "osdep.h"
 #include "qemu-queue.h"
 #include "targphys.h"
+#include "ski-config.h"
+#include "ski-debug.h"
+#include "ski-liveness.h"
+
+//#include "ski.h"
 
 #ifndef TARGET_LONG_BITS
 #error TARGET_LONG_BITS must be defined before including this header
@@ -66,6 +71,11 @@ typedef uint64_t target_ulong __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
 #define EXCP_HLT        0x10001 /* hlt instruction reached */
 #define EXCP_DEBUG      0x10002 /* cpu stopped after a breakpoint or singlestep */
 #define EXCP_HALTED     0x10003 /* cpu is halted (waiting for external event) */
+
+//PF:
+#define EXCP_SKI_ENTER_WAITING    0x10004 /* cpu is waiting on entering a system call for the other testing cpus  */
+#define EXCP_SKI_EXIT_WAITING		0x10005 /* cpu is waiting while exiting a system call for the other testing cpus  */
+#define EXCP_SKI_SCHEDULER		0x10006     /* cpu is blocked because of skis scheduler  */
 
 #define TB_JMP_CACHE_BITS 12
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
@@ -153,6 +163,82 @@ typedef struct CPUWatchpoint {
     QTAILQ_ENTRY(CPUWatchpoint) entry;
 } CPUWatchpoint;
 
+//PF:
+
+typedef struct ski_interrupt{
+    int exists;
+    int int_no;
+    int is_int_instruction;
+    int is_hw;
+} ski_interrupt;
+
+#define SKI_MAX_INTERRUPTS_STACK 20
+
+#define SKI_MAX_LIVENESS_PAUSE_DISTANCE 30
+#define SKI_MAX_LIVENESS_MA_LOOP_THRESHOLD 10000
+
+typedef struct SKICPU {
+	// parameters given by the usermode app	
+	int nr_cpus;
+	int nr_max_instr;
+	int bug_depth;  //XXX: Need to initialize
+
+	// internal state of the test for this cpu
+	int state;
+	int nr_instr_executed;
+	int nr_instr_executed_other;
+
+	// scheduler
+	int priority;   // lower values represent higher priority. Priority goes from 0 to N_CPU + N_Preemption_points
+	int priority_adjust;  // used by the starvation detector mechanism
+	bool blocked;
+
+	// Interrupts to ignore should be flaged with 1
+	uint32_t ski_ignore_interrupts[8];
+
+	// statistics
+    int nr_syscalls_self;
+    int nr_interrupts_self;
+    int nr_syscalls_other;
+    int nr_interrupts_other;
+
+	// identify of the process/thread
+	int cr3;
+	int gdt;
+
+	// interrupt stack
+	ski_interrupt interrupts_stack[SKI_MAX_INTERRUPTS_STACK];
+	int interrupts_stack_no;
+
+	// liveness heuristics
+	ski_ma cpu_rs;
+	int wait_for_interrupt;
+
+	// true if it's the last cpu to enter the test (used by the snapshot mechanism)
+	bool last_enter_cpu;
+} SKICPU;
+
+// PF: For the general log
+extern bool ski_trace_active;
+
+// PF: For the execution trace log
+extern FILE* ski_exec_trace_execution_fd;
+extern int ski_exec_trace_nr_entries; //used to limit the size of the log (cycles are not included in this count)
+extern int ski_exec_instruction_counter_total; 
+extern int ski_exec_instruction_counter_per_cycle;
+
+extern int ski_sched_instructions_current;
+//extern int ski_sched_instructions_total;
+
+extern int ski_block_other_cpus;
+
+//void ski_exec_trace_flush(void);
+//void ski_reset_common(void);
+
+void ski_loop_init(void); 
+void ski_loop_finish(void);
+void ski_loop_flush(void);
+
 #define CPU_TEMP_BUF_NLONGS 128
 #define CPU_COMMON                                                      \
     struct TranslationBlock *current_tb; /* currently executing TB  */  \
@@ -218,6 +304,12 @@ typedef struct CPUWatchpoint {
     struct KVMState *kvm_state;                                         \
     struct kvm_run *kvm_run;                                            \
     int kvm_fd;                                                         \
-    int kvm_vcpu_dirty;
+    int kvm_vcpu_dirty;													\
+																		\
+	/* PF: */															\
+	bool ski_active;													\
+	SKICPU ski_cpu;													\
+	bool ski_old_stopped;	/* No need for ski_active to be true */	\
+	bool ski_old_stop;	/* No need for ski_active to be true */	\
 
 #endif

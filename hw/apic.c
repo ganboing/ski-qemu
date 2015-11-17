@@ -24,6 +24,7 @@
 #include "sysbus.h"
 #include "trace.h"
 #include "pc.h"
+#include "ski.h"
 
 /* APIC Local Vector Table */
 #define APIC_LVT_TIMER   0
@@ -171,6 +172,7 @@ static void apic_local_deliver(APICState *s, int vector)
         break;
 
     case APIC_DM_EXTINT:
+		// printf("apic_local_deliver: APIC_DM_EXTINT:\n"); //PF:
         cpu_interrupt(s->cpu_env, CPU_INTERRUPT_HARD);
         break;
 
@@ -349,11 +351,68 @@ static int get_highest_priority_int(uint32_t *tab)
     return -1;
 }
 
+/* PF: ignore interrupts that we're not considering */
+
+int ski_apic_process_incoming_interrupts(CPUState * env){
+	if(env && env->ski_active){
+		if(env->ski_cpu.state == SKI_CPU_RUNNING_TEST || env->ski_cpu.state == SKI_CPU_BLOCKED_ON_EXIT){
+			SKI_TRACE_ACTIVE("ski_apic_process_incoming_interrupts: res = 1\n");
+			return 1;
+		}
+	}
+	SKI_TRACE_ACTIVE("ski_apic_process_incoming_interrupts: res = 0\n");
+	return 0;
+}
+
+//PF: No side-effects function
+int ski_apic_get_highest_priority_int(uint32_t *tab, void *opaque)
+{
+	APICState *s = (APICState *)opaque;
+	CPUState *env = s->cpu_env;
+	//uint32_t *ign = env->ski_cpu.ski_ignore_interrupts;
+
+	if(ski_apic_process_incoming_interrupts(env)){
+		SKI_TRACE_ACTIVE("ski_apic_get_highest_priority_int tab = %8x %8x %8x %8x %8x %8x %8x %8x\n", tab[0],tab[1],tab[2],tab[3],tab[4],tab[5],tab[6],tab[7]);
+		int highest_int  = ski_threads_find_next_runnable_int(env);
+		SKI_TRACE_ACTIVE("ski_apic_get_highest_priority_int: highest_int = %d, get_bit = %d\n", highest_int, get_bit(tab,highest_int));
+		if(highest_int >= 0){
+			if(get_bit(tab,highest_int)==0){
+				SKI_ASSERT(0);
+			}
+		}else{
+			highest_int =  -1;
+		}
+		SKI_TRACE_ACTIVE("ski_apic_get_highest_priority_int: returning = %d\n", highest_int);
+		return highest_int;	
+		/*
+		SKI_TRACE_ACTIVE("ski_apic_get_highest_priority_int: ign = %8x %8x %8x %8x %8x %8x %8x %8x\n", ign[0],ign[1],ign[2],ign[3],ign[4],ign[5],ign[6],ign[7]);
+		for(i = 7; i >= 0; i--) {
+			ele = tab[i] & ~ign[i];
+			if (ele != 0) {
+				SKI_TRACE_ACTIVE("ski_apic_get_highest_priority_int:: returning %d\n", i * 32 + fls_bit(ele));
+				return i * 32 + fls_bit(ele);
+			}
+		}
+		SKI_TRACE_ACTIVE("ski_apic_get_highest_priority_int:: returning %d\n", -1);
+		return -1;
+		*/
+	}else{
+		return get_highest_priority_int(tab);
+	}
+}
+
+int ski_apic_check_interrupt_set(int int_no, void *opaque_apic){
+	APICState *s = (APICState *)opaque_apic;
+	return get_bit(s->isr, int_no);
+
+}
+
 static int apic_get_ppr(APICState *s)
 {
     int tpr, isrv, ppr;
 
     tpr = (s->tpr >> 4);
+//    isrv = ski_get_highest_priority_int(s->isr, s);
     isrv = get_highest_priority_int(s->isr);
     if (isrv < 0)
         isrv = 0;
@@ -377,8 +436,33 @@ static int apic_get_arb_pri(APICState *s)
  * 0  - no interrupt,
  * >0 - interrupt number
  */
-static int apic_irq_pending(APICState *s)
+
+/*PF: Making this function externally accessible, now declare the arugment as void*
+      Function without side effects
+*/
+
+int ski_apic_irq_pending(void *opaque)
 {
+	APICState *s = (APICState*) opaque;
+	CPUState *env = s->cpu_env;
+	SKI_TRACE_ACTIVE("ski_apic_irq_pending\n");
+    int irrv, ppr;
+    irrv = ski_apic_get_highest_priority_int(s->irr, s);
+    if (irrv < 0) {
+        return 0;
+    }
+    ppr = apic_get_ppr(s);
+    if (ppr && (irrv & 0xf0) <= (ppr & 0xf0)) {
+        return -1;
+    }
+
+	SKI_TRACE_ACTIVE("ski_apic_irq_pending: returning = %d\n", irrv);
+    return irrv;
+}
+
+static int apic_irq_pending(void *opaque)
+{
+	APICState *s = (APICState*) opaque;
     int irrv, ppr;
     irrv = get_highest_priority_int(s->irr);
     if (irrv < 0) {
@@ -391,7 +475,6 @@ static int apic_irq_pending(APICState *s)
 
     return irrv;
 }
-
 /* signal the CPU if an irq is pending */
 static void apic_update_irq(APICState *s)
 {
@@ -422,7 +505,7 @@ int apic_get_irq_delivered(void)
 
 static void apic_set_irq(APICState *s, int vector_num, int trigger_mode)
 {
-    apic_irq_delivered += !get_bit(s->irr, vector_num);
+	apic_irq_delivered += !get_bit(s->irr, vector_num);
 
     trace_apic_set_irq(apic_irq_delivered);
 
@@ -432,12 +515,13 @@ static void apic_set_irq(APICState *s, int vector_num, int trigger_mode)
     else
         reset_bit(s->tmr, vector_num);
     apic_update_irq(s);
+	ski_handle_new_irq_set(s->cpu_env, vector_num, trigger_mode);
 }
 
 static void apic_eoi(APICState *s)
 {
     int isrv;
-    isrv = get_highest_priority_int(s->isr);
+    isrv = ski_apic_get_highest_priority_int(s->isr, s);
     if (isrv < 0)
         return;
     reset_bit(s->isr, isrv);
@@ -557,6 +641,11 @@ static void apic_deliver(DeviceState *d, uint8_t dest, uint8_t dest_mode,
     int dest_shorthand = (s->icr[0] >> 18) & 3;
     APICState *apic_iter;
 
+	CPUState *env = s->cpu_env;
+//	if(env){
+		SKI_TRACE_ACTIVE("apic_deliver: dest=%d, dest_mode=%d, delivery_mode=%d, vector_num=%d, trigger_mode=%d\n", dest, dest_mode, delivery_mode, vector_num, trigger_mode);
+//	}
+
     switch (dest_shorthand) {
     case 0:
         apic_get_delivery_bitmask(deliver_bitmask, dest, dest_mode);
@@ -596,7 +685,7 @@ static void apic_deliver(DeviceState *d, uint8_t dest, uint8_t dest_mode,
     apic_bus_deliver(deliver_bitmask, delivery_mode, vector_num, trigger_mode);
 }
 
-int apic_get_interrupt(DeviceState *d)
+int original_apic_get_interrupt(DeviceState *d)
 {
     APICState *s = DO_UPCAST(APICState, busdev.qdev, d);
     int intno;
@@ -609,6 +698,32 @@ int apic_get_interrupt(DeviceState *d)
         return -1;
 
     intno = apic_irq_pending(s);
+
+    if (intno == 0) {
+        return -1;
+    } else if (intno < 0) {
+        return s->spurious_vec & 0xff;
+    }
+    reset_bit(s->irr, intno);
+    set_bit(s->isr, intno);
+    apic_update_irq(s);
+    return intno;
+}
+
+
+int ski_apic_get_interrupt(DeviceState *d)
+{
+    APICState *s = DO_UPCAST(APICState, busdev.qdev, d);
+    int intno;
+
+    /* if the APIC is installed or enabled, we let the 8259 handle the
+       IRQs */
+    if (!s)
+        return -1;
+    if (!(s->spurious_vec & APIC_SV_ENABLE))
+        return -1;
+
+    intno = ski_apic_irq_pending(s);
 
     if (intno == 0) {
         return -1;

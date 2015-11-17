@@ -59,6 +59,7 @@
 #include "cpu.h"
 #include "trace.h"
 #include "trace/control.h"
+#include "piking.h"
 #ifdef CONFIG_TRACE_SIMPLE
 #include "trace/simple.h"
 #endif

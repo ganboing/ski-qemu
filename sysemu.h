@@ -58,6 +58,7 @@ void qemu_remove_exit_notifier(Notifier *notify);
 
 void qemu_add_machine_init_done_notifier(Notifier *notify);
 
+void ski_do_savevm();
 void do_savevm(Monitor *mon, const QDict *qdict);
 int load_vmstate(const char *name);
 void do_delvm(Monitor *mon, const QDict *qdict);
@@ -123,6 +124,30 @@ extern uint8_t *boot_splash_filedata;
 extern int boot_splash_filedata_size;
 extern uint8_t qemu_extra_params_fw[2];
 extern QEMUClock *rtc_clock;
+
+
+
+extern int ski_init_options_preemptions[];
+extern int ski_init_options_preemptions_len;
+extern char ski_init_options_priorities_filename[];
+extern char ski_init_options_ipfilter_filename[];
+extern int ski_init_options_nr_cpus;
+extern int ski_init_options_preemptionmode;
+extern int ski_init_options_seed;
+extern int ski_init_options_quit;
+extern int ski_init_options_quit_threshold;
+//Only used by ski-debug.h, so declare there instead
+extern int ski_init_options_gdbstub;
+extern int ski_init_options_fast_resume;
+//extern int ski_init_options_resume_ski;
+
+extern char ski_init_kernel_filename[];
+extern char ski_init_kernel_sha1[];
+extern int ski_init_kernel_size;
+extern char ski_init_disk_filename[];
+extern char ski_init_disk_sha1[];
+extern int ski_init_disk_size;
+
 
 #define MAX_NODES 64
 extern int nb_numa_nodes;

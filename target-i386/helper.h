@@ -1,5 +1,14 @@
 #include "def-helper.h"
 
+//PF:
+DEF_HELPER_4(ski_load_access, void, i32, i32, int, int)
+DEF_HELPER_4(ski_store_access, void, i32, i32, int, int)
+//DEF_HELPER_1(ski_instrument_mov, void, int)
+DEF_HELPER_0(ski_instrument_pause, void)
+DEF_HELPER_1(ski_instrument_pause_pos, void, int)
+DEF_HELPER_1(ski_instrument_possible_inversion_point, void, int)
+DEF_HELPER_FLAGS_1(ski_instrument_all, 0, void, int)
+
 DEF_HELPER_FLAGS_1(cc_compute_all, TCG_CALL_PURE, i32, int)
 DEF_HELPER_FLAGS_1(cc_compute_c, TCG_CALL_PURE, i32, int)
 

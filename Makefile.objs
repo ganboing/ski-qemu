@@ -1,14 +1,15 @@
 #######################################################################
 # QObject
-qobject-obj-y = qint.o qstring.o qdict.o qlist.o qfloat.o qbool.o
+#qobject-obj-y = qint.o qstring.o qdict.o qlist.o qfloat.o qbool.o ski-memfs.o
+qobject-obj-y = qint.o qstring.o qdict.o qlist.o qfloat.o qbool.o 
 qobject-obj-y += qjson.o json-lexer.o json-streamer.o json-parser.o
-qobject-obj-y += qerror.o error.o qemu-error.o
+qobject-obj-y += qerror.o error.o qemu-error.o  ski-memfs.o
 
 #######################################################################
 # oslib-obj-y is code depending on the OS (win32 vs posix)
 oslib-obj-y = osdep.o
 oslib-obj-$(CONFIG_WIN32) += oslib-win32.o qemu-thread-win32.o
-oslib-obj-$(CONFIG_POSIX) += oslib-posix.o qemu-thread-posix.o
+oslib-obj-$(CONFIG_POSIX) += oslib-posix.o qemu-thread-posix.o forkall-coop.o
 
 #######################################################################
 # coroutines
@@ -26,7 +27,7 @@ coroutine-obj-$(CONFIG_WIN32) += coroutine-win32.o
 block-obj-y = cutils.o cache-utils.o qemu-option.o module.o async.o
 block-obj-y += nbd.o block.o aio.o aes.o qemu-config.o qemu-progress.o qemu-sockets.o
 block-obj-y += $(coroutine-obj-y) $(qobject-obj-y) $(version-obj-y)
-block-obj-$(CONFIG_POSIX) += posix-aio-compat.o
+block-obj-$(CONFIG_POSIX) += posix-aio-compat.o forkall-coop.o
 block-obj-$(CONFIG_LINUX_AIO) += linux-aio.o
 
 block-nested-y += raw.o cow.o qcow.o vdi.o vmdk.o cloop.o dmg.o bochs.o vpc.o vvfat.o
@@ -115,7 +116,8 @@ common-obj-y += msmouse.o ps2.o
 common-obj-y += qdev.o qdev-properties.o
 common-obj-y += block-migration.o iohandler.o
 common-obj-y += pflib.o
-common-obj-y += bitmap.o bitops.o
+common-obj-y += bitmap.o bitops.o ski-memfs.o
+
 
 common-obj-$(CONFIG_BRLAPI) += baum.o
 common-obj-$(CONFIG_POSIX) += migration-exec.o migration-unix.o migration-fd.o
@@ -185,6 +187,7 @@ user-obj-y += $(trace-obj-y)
 
 hw-obj-y =
 hw-obj-y += vl.o loader.o
+hw-obj-y += ski-input.o ski-watchdog.o
 hw-obj-$(CONFIG_VIRTIO) += virtio-console.o
 hw-obj-y += usb-libhw.o
 hw-obj-$(CONFIG_VIRTIO_PCI) += virtio-pci.o
@@ -424,6 +427,9 @@ qga-obj-$(CONFIG_POSIX) += oslib-posix.o
 vl.o: QEMU_CFLAGS+=$(GPROF_CFLAGS)
 
 vl.o: QEMU_CFLAGS+=$(SDL_CFLAGS)
+
+forkall-coop.o: QEMU_CFLAGS+=-O0 
+forkall-coop.o: CFLAGS+=-O0 
 
 QEMU_CFLAGS+=$(GLIB_CFLAGS)
 

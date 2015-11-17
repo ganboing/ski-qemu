@@ -472,7 +472,13 @@ static void l2cap_channel_close(struct l2cap_instance_s *l2cap,
 
         l2cap->cid[cid] = NULL;
 
+// PF: SKI MEMFS
+#undef close
+
         ch->params.close(ch->params.opaque);
+// PF: SKI MEMFS
+#define close(...) memfs_hook_close(__VA_ARGS__)
+
         g_free(ch);
     }
 
@@ -1217,7 +1223,11 @@ static void l2cap_teardown(struct l2cap_instance_s *l2cap, int send_disconnect)
 
     for (cid = L2CAP_CID_ALLOC; cid < L2CAP_CID_MAX; cid ++)
         if (l2cap->cid[cid]) {
-            l2cap->cid[cid]->params.close(l2cap->cid[cid]->params.opaque);
+// PF: SKI MEMFS
+#undef close
+			l2cap->cid[cid]->params.close(l2cap->cid[cid]->params.opaque);
+// PF: SKI MEMFS
+#define close(...) memfs_hook_close(__VA_ARGS__)
             g_free(l2cap->cid[cid]);
         }
 

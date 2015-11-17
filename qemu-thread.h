@@ -33,6 +33,7 @@ void qemu_cond_destroy(QemuCond *cond);
 void qemu_cond_signal(QemuCond *cond);
 void qemu_cond_broadcast(QemuCond *cond);
 void qemu_cond_wait(QemuCond *cond, QemuMutex *mutex);
+int qemu_cond_timedwait(QemuCond *cond, QemuMutex *mutex, struct timespec *abstime);
 
 void qemu_thread_create(QemuThread *thread,
                        void *(*start_routine)(void*),

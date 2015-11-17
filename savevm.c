@@ -482,6 +482,9 @@ static void qemu_fill_buffer(QEMUFile *f)
         f->last_error = len;
 }
 
+// PF: SKI MEMFS
+#undef close
+
 int qemu_fclose(QEMUFile *f)
 {
     int ret = 0;
@@ -491,6 +494,8 @@ int qemu_fclose(QEMUFile *f)
     g_free(f);
     return ret;
 }
+// PF: SKI MEMFS
+#define close(...) memfs_hook_close(__VA_ARGS__)
 
 void qemu_file_put_notify(QEMUFile *f)
 {
@@ -1488,13 +1493,26 @@ static void vmstate_save(QEMUFile *f, SaveStateEntry *se)
 #define QEMU_VM_SECTION_FULL         0x04
 #define QEMU_VM_SUBSECTION           0x05
 
+extern int ski_snapshot;
+
+#define SKI_MONITOR_PRINTF(...)				\
+	{											\
+	if(ski_snapshot){						\
+		printf("[SKI] ");				\
+		printf(__VA_ARGS__);					\
+	}else{										\
+		monitor_printf(mon, __VA_ARGS__); \
+	}											\
+	}
+
+
 bool qemu_savevm_state_blocked(Monitor *mon)
 {
     SaveStateEntry *se;
 
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         if (se->no_migrate) {
-            monitor_printf(mon, "state blocked by non-migratable device '%s'\n",
+            SKI_MONITOR_PRINTF("state blocked by non-migratable device '%s'\n",
                            se->idstr);
             return true;
         }
@@ -1933,7 +1951,7 @@ static int del_existing_snapshots(Monitor *mon, const char *name)
         {
             ret = bdrv_snapshot_delete(bs, name);
             if (ret < 0) {
-                monitor_printf(mon,
+                SKI_MONITOR_PRINTF(
                                "Error while deleting snapshot on '%s'\n",
                                bdrv_get_device_name(bs));
                 return -1;
@@ -1943,6 +1961,187 @@ static int del_existing_snapshots(Monitor *mon, const char *name)
 
     return 0;
 }
+
+static int ski_del_existing_snapshots(const char *name)
+{
+    BlockDriverState *bs;
+    QEMUSnapshotInfo sn1, *snapshot = &sn1;
+    int ret;
+
+    bs = NULL;
+    while ((bs = bdrv_next(bs))) {
+        if (bdrv_can_snapshot(bs) &&
+            bdrv_snapshot_find(bs, snapshot, name) >= 0)
+        {
+            ret = bdrv_snapshot_delete(bs, name);
+            if (ret < 0) {
+                printf("[SKI_SNAP] Error while deleting snapshot on '%s'\n",
+                               bdrv_get_device_name(bs));
+                return -1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+
+void ski_do_savevm()
+{
+    BlockDriverState *bs, *bs1;
+    QEMUSnapshotInfo sn1, *sn = &sn1, old_sn1, *old_sn = &old_sn1;
+    int ret;
+    QEMUFile *f;
+    int saved_vm_running;
+    uint32_t vm_state_size;
+	// TODO: Check that mon and qdict is not used
+
+	Monitor *mon = 0;
+	QDict *qdict = 0;
+
+	assert(ski_snapshot == 0);
+	ski_snapshot = 1;
+
+#ifdef _WIN32
+    struct _timeb tb;
+    struct tm *ptm;
+#else
+    struct timeval tv;
+    struct tm tm;
+#endif
+    //const char *name = qdict_get_try_str(qdict, "name");
+	const char *name = 0;
+
+    /* Verify if there is a device that doesn't support snapshots and is writable */
+    bs = NULL;
+    while ((bs = bdrv_next(bs))) {
+
+        if (!bdrv_is_inserted(bs) || bdrv_is_read_only(bs)) {
+            continue;
+        }
+
+        if (!bdrv_can_snapshot(bs)) {
+            printf("[SKI_SNAP] Device '%s' is writable but does not support snapshots.\n",
+                               bdrv_get_device_name(bs));
+            fprintf(stderr,"[SKI_SNAP] Device '%s' is writable but does not support snapshots.\n",
+                               bdrv_get_device_name(bs));
+            return;
+        }
+    }
+
+    bs = bdrv_snapshots();
+    if (!bs) {
+        printf("[SKI_SNAP] No block device can accept snapshots\n");
+        fprintf(stderr,"[SKI_SNAP] No block device can accept snapshots\n");
+		assert(0);
+        return;
+    }
+
+// TODO: 
+//   - May need to ensure that races with the other threads (e.g., the actual monitor thread) are not possible
+
+
+// <SKI> Already stops the VM, but still need to flush and to store the timer offset (through the cpu_disable_ticks())
+//   Original: saved_vm_running = runstate_is_running();
+//   Original: vm_stop(RUN_STATE_SAVE_VM);
+// FROM do_vm_stop():
+	  cpu_disable_ticks(); //IMPORTANT
+      //pause_all_vcpus(); IGNORE
+      runstate_set(RUN_STATE_SAVE_VM); 
+      //vm_state_notify(0, state); MAYBE IGNORE FOR NOW
+      qemu_aio_flush();
+      bdrv_flush_all();
+      //monitor_protocol_event(QEVENT_STOP, NULL); IGNORE
+// <SKI END>
+
+    memset(sn, 0, sizeof(*sn));
+
+    /* fill auxiliary fields */
+#ifdef _WIN32
+    _ftime(&tb);
+    sn->date_sec = tb.time;
+    sn->date_nsec = tb.millitm * 1000000;
+#else
+    gettimeofday(&tv, NULL);
+    sn->date_sec = tv.tv_sec;
+    sn->date_nsec = tv.tv_usec * 1000;
+#endif
+    sn->vm_clock_nsec = qemu_get_clock_ns(vm_clock);
+
+    if (name) {
+        ret = bdrv_snapshot_find(bs, old_sn, name);
+        if (ret >= 0) {
+            pstrcpy(sn->name, sizeof(sn->name), old_sn->name);
+            pstrcpy(sn->id_str, sizeof(sn->id_str), old_sn->id_str);
+        } else {
+            pstrcpy(sn->name, sizeof(sn->name), name);
+        }
+    } else {
+#ifdef _WIN32
+        ptm = localtime(&tb.time);
+        strftime(sn->name, sizeof(sn->name), "ski-vm-%Y%m%d%H%M%S", ptm);
+#else
+        /* cast below needed for OpenBSD where tv_sec is still 'long' */
+        localtime_r((const time_t *)&tv.tv_sec, &tm);
+        strftime(sn->name, sizeof(sn->name), "ski-vm-%Y%m%d%H%M%S", &tm);
+#endif
+    }
+	
+	printf("[SKI] Successfully wrote snapshot!!\n");
+	printf("[SKI] Snapshot name: %s\n", sn->name);
+
+    /* Delete old snapshots of the same name */
+    if (name && del_existing_snapshots(mon,name) < 0) {
+        goto the_end;
+    }
+
+    /* save the VM state */
+    f = qemu_fopen_bdrv(bs, 1);
+    if (!f) {
+        SKI_MONITOR_PRINTF("Could not open VM state file\n");
+        goto the_end;
+    }
+    ret = qemu_savevm_state(mon, f);
+    vm_state_size = qemu_ftell(f);
+    qemu_fclose(f);
+    if (ret < 0) {
+        SKI_MONITOR_PRINTF("Error %d while writing VM\n", ret);
+        goto the_end;
+    }
+
+    /* create the snapshots */
+
+    bs1 = NULL;
+    while ((bs1 = bdrv_next(bs1))) {
+        if (bdrv_can_snapshot(bs1)) {
+            /* Write VM state size only to the image that contains the state */
+            sn->vm_state_size = (bs == bs1 ? vm_state_size : 0);
+            ret = bdrv_snapshot_create(bs1, sn);
+            if (ret < 0) {
+                SKI_MONITOR_PRINTF("Error while creating snapshot on '%s'\n",
+                               bdrv_get_device_name(bs1));
+            }
+        }
+    }
+
+ the_end:
+	ski_snapshot = 0;
+	
+	sync(); // Because we removed the fsyncs in the "handle_aiocb_flush()"
+	
+
+// <SKI> SKI already stops the VM, but still need to restore some things:
+//    Original: if (saved_vm_running)
+//    Original:   vm_start();
+// From the function vm_start():	
+        cpu_enable_ticks();
+        runstate_set(RUN_STATE_RUNNING);
+        //vm_state_notify(1, RUN_STATE_RUNNING);
+        //resume_all_vcpus();
+        //monitor_protocol_event(QEVENT_RESUME, NULL);
+// </SKI>
+}
+
 
 void do_savevm(Monitor *mon, const QDict *qdict)
 {
@@ -1970,7 +2169,7 @@ void do_savevm(Monitor *mon, const QDict *qdict)
         }
 
         if (!bdrv_can_snapshot(bs)) {
-            monitor_printf(mon, "Device '%s' is writable but does not support snapshots.\n",
+            SKI_MONITOR_PRINTF("Device '%s' is writable but does not support snapshots.\n",
                                bdrv_get_device_name(bs));
             return;
         }
@@ -1978,7 +2177,7 @@ void do_savevm(Monitor *mon, const QDict *qdict)
 
     bs = bdrv_snapshots();
     if (!bs) {
-        monitor_printf(mon, "No block device can accept snapshots\n");
+        SKI_MONITOR_PRINTF("No block device can accept snapshots\n");
         return;
     }
 
@@ -2026,14 +2225,14 @@ void do_savevm(Monitor *mon, const QDict *qdict)
     /* save the VM state */
     f = qemu_fopen_bdrv(bs, 1);
     if (!f) {
-        monitor_printf(mon, "Could not open VM state file\n");
+        SKI_MONITOR_PRINTF("Could not open VM state file\n");
         goto the_end;
     }
     ret = qemu_savevm_state(mon, f);
     vm_state_size = qemu_ftell(f);
     qemu_fclose(f);
     if (ret < 0) {
-        monitor_printf(mon, "Error %d while writing VM\n", ret);
+        SKI_MONITOR_PRINTF("Error %d while writing VM\n", ret);
         goto the_end;
     }
 
@@ -2046,7 +2245,7 @@ void do_savevm(Monitor *mon, const QDict *qdict)
             sn->vm_state_size = (bs == bs1 ? vm_state_size : 0);
             ret = bdrv_snapshot_create(bs1, sn);
             if (ret < 0) {
-                monitor_printf(mon, "Error while creating snapshot on '%s'\n",
+                SKI_MONITOR_PRINTF("Error while creating snapshot on '%s'\n",
                                bdrv_get_device_name(bs1));
             }
         }
@@ -2113,6 +2312,7 @@ int load_vmstate(const char *name)
             if (ret < 0) {
                 error_report("Error %d while activating snapshot '%s' on '%s'",
                              ret, name, bdrv_get_device_name(bs));
+				assert(0);
                 return ret;
             }
         }
@@ -2145,7 +2345,7 @@ void do_delvm(Monitor *mon, const QDict *qdict)
 
     bs = bdrv_snapshots();
     if (!bs) {
-        monitor_printf(mon, "No block device supports snapshots\n");
+        SKI_MONITOR_PRINTF("No block device supports snapshots\n");
         return;
     }
 
@@ -2154,13 +2354,14 @@ void do_delvm(Monitor *mon, const QDict *qdict)
         if (bdrv_can_snapshot(bs1)) {
             ret = bdrv_snapshot_delete(bs1, name);
             if (ret < 0) {
-                if (ret == -ENOTSUP)
-                    monitor_printf(mon,
+                if (ret == -ENOTSUP){
+                    SKI_MONITOR_PRINTF(
                                    "Snapshots not supported on device '%s'\n",
                                    bdrv_get_device_name(bs1));
-                else
-                    monitor_printf(mon, "Error %d while deleting snapshot on "
+                }else{
+                    SKI_MONITOR_PRINTF( "Error %d while deleting snapshot on "
                                    "'%s'\n", ret, bdrv_get_device_name(bs1));
+				}
             }
         }
     }
@@ -2177,18 +2378,18 @@ void do_info_snapshots(Monitor *mon)
 
     bs = bdrv_snapshots();
     if (!bs) {
-        monitor_printf(mon, "No available block device supports snapshots\n");
+        SKI_MONITOR_PRINTF("No available block device supports snapshots\n");
         return;
     }
 
     nb_sns = bdrv_snapshot_list(bs, &sn_tab);
     if (nb_sns < 0) {
-        monitor_printf(mon, "bdrv_snapshot_list: error %d\n", nb_sns);
+        SKI_MONITOR_PRINTF("bdrv_snapshot_list: error %d\n", nb_sns);
         return;
     }
 
     if (nb_sns == 0) {
-        monitor_printf(mon, "There is no snapshot available.\n");
+        SKI_MONITOR_PRINTF("There is no snapshot available.\n");
         return;
     }
 
@@ -2216,13 +2417,13 @@ void do_info_snapshots(Monitor *mon)
     }
 
     if (total > 0) {
-        monitor_printf(mon, "%s\n", bdrv_snapshot_dump(buf, sizeof(buf), NULL));
+        SKI_MONITOR_PRINTF("%s\n", bdrv_snapshot_dump(buf, sizeof(buf), NULL));
         for (i = 0; i < total; i++) {
             sn = &sn_tab[available_snapshots[i]];
-            monitor_printf(mon, "%s\n", bdrv_snapshot_dump(buf, sizeof(buf), sn));
+            SKI_MONITOR_PRINTF("%s\n", bdrv_snapshot_dump(buf, sizeof(buf), sn));
         }
     } else {
-        monitor_printf(mon, "There is no suitable snapshot available\n");
+        SKI_MONITOR_PRINTF("There is no suitable snapshot available\n");
     }
 
     g_free(sn_tab);

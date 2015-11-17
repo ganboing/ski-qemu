@@ -26,12 +26,85 @@
 #include "qemu-log.h"
 #include "cpu-defs.h"
 #include "helper.h"
+#include "ski.h"
+#include "ski-config.h"
+#include "ski-ipfilter.h"
+#include "ski-liveness.h"
+#include "ski-by-eip.h"
+
+#include "forkall-coop.h"
+#include "ski-stats.h"
+#include "ski-heuristics.h"
+#include "ski-race-detector.h"
+#include "ski-instruction-detector.h"
+#include "ski-memory-detector.h"
 
 #if !defined(CONFIG_USER_ONLY)
 #include "softmmu_exec.h"
 #endif /* !defined(CONFIG_USER_ONLY) */
 
 //#define DEBUG_PCALL
+
+#define SKI_LOOP_ENABLED 1
+#define SKI_LOOP_INTERATIONS_ACTIVATE 10
+#define SKI_LOOP_MAX_LOG_ENTRIES 10
+#define SKI_LOOP_CMP_IGNORE_REGISTERS
+#define SKI_LOOP_TRACE if(0) printf
+//#define SKI_LOOP_TRACE printf
+//#define SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED 0
+
+FILE *ski_fd_loop_debug_rawinput = 0;
+FILE *ski_fd_loop_debug_decompress = 0;
+
+extern thread_context* ski_threads_current;
+extern int ski_init_options_preemption_by_eip;
+
+extern int ski_init_options_trace_instructions_enabled;
+extern int ski_init_options_trace_memory_accesses_enabled;
+
+
+static inline thread_context* ski_get_current_thread(){
+	if(ski_threads_current){
+		return ski_threads_current;
+	}
+	SKI_TRACE("ski_get_current_thread(): ski_threads_current not valid!!!\n");
+	assert(0);
+}
+
+typedef struct ski_loop_execution_context {
+    int count;
+    int vcpu;
+    int eip;
+    int eax;
+    int ebx;
+    int ecx;
+    int edx;
+    int esp;
+    int ebp;
+    int esi;
+    int edi;
+    int cs;
+    int ss;
+    int ds;
+    int cr3;
+    int gdt;
+} ski_loop_execution_context;
+
+int ski_loop_log_head = -1;
+ski_loop_execution_context ski_loop_log[SKI_LOOP_MAX_LOG_ENTRIES];
+
+
+static inline void ski_loop_debug_dump(void);
+static inline void ski_loop_store_instruction(ski_loop_execution_context* c, int explicit_eip, int update_if_exists);
+static inline int  ski_loop_find_entry(int eip);
+static inline void ski_loop_print_entry(ski_loop_execution_context *c);
+static inline void ski_loop_debug_print_entry(ski_loop_execution_context *c, FILE *fd);
+static inline void ski_loop_print_reset_all();
+static inline void ski_loop_print_reset_range(int reset_start, int reset_end);
+static inline int  ski_loop_equal_vcpu_regs(int existing_pos, int eip);
+static inline int  ski_loop_add_instruction(int explicit_eip);
+
+static inline bool ski_correct_thread(void);
 
 #ifdef DEBUG_PCALL
 #  define LOG_PCALL(...) qemu_log_mask(CPU_LOG_PCALL, ## __VA_ARGS__)
@@ -41,6 +114,818 @@
 #  define LOG_PCALL(...) do { } while (0)
 #  define LOG_PCALL_STATE(env) do { } while (0)
 #endif
+
+
+// PF: ==========================
+#define SPIKE_KERNEL_SYSCALL_INT 0x80
+
+static int ski_last_eip = 0;
+
+static inline void dump_memory_access(uint32_t mem_address, uint32_t value, int mem_index, int n_bits, int is_load, FILE *fd)
+{
+
+	if(likely(fd && (ski_exec_trace_nr_entries < SKI_EXEC_TRACE_MAX_ENTRIES))){
+		unsigned int mask;
+		switch(n_bits){
+			case 8: mask = 0xFF; break;
+			case 16: mask = 0xFFFF; break;
+			case 32: mask = 0xFFFFFFFF; break;
+			default: assert(0); break;
+		}
+
+		target_phys_addr_t paddr = 0;
+		paddr = cpu_get_phys_page_debug(env, mem_address);
+		if (paddr != -1){
+			paddr = (paddr & TARGET_PAGE_MASK) | (mem_address & ~TARGET_PAGE_MASK);
+		}
+
+#ifndef SKI_DISABLE_TRACE_OUTPUT
+		if(ski_init_options_trace_memory_accesses_enabled){
+			fprintf(fd,"### MEM: %d %x %x %x %x %d %c %x\n", (int) env->cpu_index, ski_last_eip, mem_address, value & mask,  mem_index, n_bits, is_load ? 'L' : 'S', paddr);
+		}
+		//fflush(fd);
+#endif  // SKI_DISABLE_TRACE_OUTPUT
+
+		//void ski_stats_add_data_access(unsigned int data_address, unsigned int eip_address, unsigned int size_bytes, int is_write, unsigned int cpu_no)
+		if(ski_forkall_enabled){
+			ski_stats_add_data_access(mem_address, ski_last_eip, n_bits/8, is_load?0:1, env->cpu_index);
+		}
+	}
+}
+
+extern int ski_init_options_race_detector_enabled;
+
+static inline void race_detector(int mem_address, int n_bits, int is_read)
+{
+	if(ski_init_options_race_detector_enabled){
+		ski_race_detector *rd = &ski_stats_get_self()->rd;
+		int length = n_bits / 8;
+		int cpu = env->cpu_index;
+
+		int paddr = 0;
+        paddr = cpu_get_phys_page_debug(env, mem_address);
+        if (paddr != -1){
+            paddr = (paddr & TARGET_PAGE_MASK) | (mem_address & ~TARGET_PAGE_MASK);
+        }
+
+		ski_race_detector_new_access(rd, cpu, paddr, ski_last_eip, length, is_read, ski_exec_instruction_counter_total);
+	}
+}
+
+// static inline void ski_instruction_detector_new_access(ski_md *md, int eip_address, int memory_address, int is_read, int size_bytes)
+
+static inline void memory_detector(int mem_address, int n_bits, int is_read){
+#ifdef SKI_MEMORY_DETECTOR_ENABLED
+		ski_md *md = &ski_stats_get_self()->md;
+		int size_bytes = n_bits / 8;
+
+		int paddr = 0;
+        paddr = cpu_get_phys_page_debug(env, mem_address);
+        if (paddr != -1){
+            paddr = (paddr & TARGET_PAGE_MASK) | (mem_address & ~TARGET_PAGE_MASK);
+        }
+
+		ski_memory_detector_new_access(md, ski_last_eip, paddr, is_read, size_bytes);
+
+#endif
+
+}
+
+// ignore the instruction accesses
+void helper_ski_load_access(uint32_t address, uint32_t value, int mem_index, int n_bits) {
+    if(env->ski_active == false){
+		return false;
+	}
+#ifdef SKI_MEMORY_INTERCEPT_EXECUTION_FILE
+	int is_load = 1;
+	dump_memory_access(address, value, mem_index, n_bits, is_load, ski_exec_trace_execution_fd);
+#endif
+
+	race_detector(address, n_bits, 1);
+	memory_detector(address, n_bits, 1);
+
+	int count = ski_liveness_store(&env->ski_cpu.cpu_rs, ski_last_eip, address, value);
+	//ski_liveness_dump(&env->ski_cpu.cpu_rs);
+
+	// TODO: Still need to deal with the issue of the granularity/alignment of the accesses
+	if (unlikely(count > SKI_MAX_LIVENESS_MA_LOOP_THRESHOLD)){
+		int is_pause = 0;
+		ski_threads_self_wait_rs(env, is_pause);
+		// Don't need to switch right away...let the scheduler do it (when we leave the basic block)
+	}
+
+}
+
+void helper_ski_store_access(uint32_t address, uint32_t value, int mem_index, int n_bits) {
+    if(env->ski_active == false){
+		return false;
+	}
+#ifdef SKI_MEMORY_INTERCEPT_EXECUTION_FILE
+	int is_load = 0;
+	dump_memory_access(address, value, mem_index, n_bits, is_load , ski_exec_trace_execution_fd);
+#endif
+
+	race_detector(address, n_bits, 0);
+	memory_detector(address, n_bits, 0);
+	
+	int woke_up_some_thread = ski_threads_all_wake_rs(env, address);
+	if(woke_up_some_thread){
+        SKI_TRACE("helper_ski_store_access: unblocked thread\n");
+        // Must not exit in the middle of the access because we're executing the instruction
+	}
+
+	//TODO: ski_liveness_is_present();
+}
+
+
+static inline bool ski_correct_thread(void){
+	if(env->ski_active == false){
+		return false;
+	}
+	if(env->ski_cpu.state == SKI_CPU_NA){
+		return false;
+	}
+
+	return true;
+}
+
+
+static inline void ski_syscall_enter(void){
+	if(ski_correct_thread()==false){
+		if(env->ski_active == true){
+			env->ski_cpu.nr_syscalls_other++;
+		}
+		return;
+	}else{
+		env->ski_cpu.nr_syscalls_self++;
+	}
+
+	SKI_TRACE("ski_syscall_enter (nr mov: %d)\n", env->ski_cpu.nr_instr_executed);
+
+}
+
+static inline void ski_syscall_exit(void){
+	if(ski_correct_thread()==false){
+		return;
+	}
+
+	SKI_TRACE("ski_syscall_exit (nr mov: %d)\n", env->ski_cpu.nr_instr_executed);
+
+}
+
+
+void ski_ipfilter_dump(void){
+
+#ifdef SKI_IPFILTER_HASH 
+    printf("ski_ipfilter_dump: ski_init_ipfilter_ranges_count = %d\n", HASH_COUNT(ski_ipfilter_hash));
+    ski_ipfilter_hash_entry *e;
+
+    for(e=ski_ipfilter_hash; e != NULL; e=e->hh.next) {
+        printf("ski_ipfilter_dump: %d\n", e->eip);
+    }
+#else
+	int i;
+	printf("ski_ipfilter_dump: ski_init_ipfilter_ranges_count = %d\n", ski_init_ipfilter_ranges_count);
+    for(i=0;i<ski_init_ipfilter_ranges_count;i++){
+        ski_ipfilter_range* r = &ski_init_ipfilter_ranges[i];
+        printf("ski_ipfilter_dump: i=%d start=%d end=%d\n", i , r->start, r->end);
+    }
+#endif
+}   
+
+static inline int ski_ipfilter_check(int eip){
+    int res = 0;
+
+#ifdef SKI_IPFILTER_HASH 
+	if(HASH_COUNT(ski_ipfilter_hash)==0){
+		res = 1;	
+	}else{
+		ski_ipfilter_hash_entry *e;
+		HASH_FIND_INT(ski_ipfilter_hash, &eip, e);
+		res = ((e!=0)?1:0);
+		//SKI_TRACE("IPFILTER: %x res: %d\n", eip, res);
+	}
+#else
+    if(ski_init_ipfilter_ranges_count == 0){
+        res = 1;
+    }
+
+    for(i=0;i<ski_init_ipfilter_ranges_count;i++){
+        ski_ipfilter_range* r = &ski_init_ipfilter_ranges[i];
+        if (unlikely((eip >= r->start) && (eip <= r->end))){
+            res = 1;
+            break;
+        }
+    }   
+#endif
+    //SKI_TRACE("ski_ipfilter_check: eip = %d (%x), entry = %d, res = %d\n", eip, eip, i, res);
+    return res;
+}
+
+void helper_ski_instrument_possible_inversion_point(int explicit_eip)
+{
+	if(likely(env->ski_active == false)){
+		return;
+	}else{
+		if(!ski_preemption_mode_matches(env)){
+			return;
+		}
+
+		if(unlikely(ski_correct_thread()==false)){
+			env->ski_cpu.nr_instr_executed_other++;
+		}else{
+			env->ski_cpu.nr_instr_executed++;
+			ski_sched_instructions_total++;
+
+			/* XXX: Does this make sense now , perhaps disable it?? */
+			if(unlikely(ski_sched_instructions_total >= SKI_SCHED_MAX_PREEMPTION_INSTRUCTIONS)){
+				ski_loop_finish();
+				ski_exec_trace_print_comment((char *)"Max instructions for a test reached -> Resetting ski");
+				ski_exec_trace_flush();
+				SKI_TRACE("ski_sched_instructions_total = %d, ski_sched_instructions_current = %d\n", ski_sched_instructions_total, ski_sched_instructions_current);
+				SKI_TRACE("==================================================================\n");
+				SKI_TRACE("helper_ski_instrument_mov: reached limit of instructions for the test -> resetting ski!\n");
+				EIP = explicit_eip;
+
+				if(ski_forkall_enabled){
+					SKI_ASSERT_MSG(0, SKI_EXIT_MAX_PREEMPTION_INST, "MAX_PREEMPTIONS");
+				}
+
+				cpu_synchronize_all_states();
+				ski_reset();
+				cpu_loop_exit(env); 
+				return;
+			}
+
+			//SKI_TRACE("ski_sched_instructions_total = %d , env->ski_cpu.nr_max_instr = %d\n", ski_sched_instructions_total, env->ski_cpu.nr_max_instr);
+
+			int do_preemption = 0;
+
+			if(unlikely((!ski_init_options_preemption_by_eip) && (ski_sched_instructions_total == env->ski_cpu.nr_max_instr))){
+				SKI_TRACE("helper_ski_instrument_mov: reached %d instructions\n", env->ski_cpu.nr_instr_executed);
+				SKI_TRACE("ski_sched_instructions_total = %d, ski_sched_instructions_current = %d\n", ski_sched_instructions_total, ski_sched_instructions_current);
+				do_preemption = 1;
+			}
+
+			if(unlikely(ski_init_options_preemption_by_eip && ski_preeemption_by_eip)){
+				ski_preeemption_by_eip_entry* head = ski_preeemption_by_eip;
+				ski_preeemption_by_eip_entry* el;
+
+				/*
+				int eip = first->eip;
+				if(first->eip == explicit_eip){
+					SKI_TRACE("helper_ski_instrument_possible_inversion_point: reached preemption by eip %x\n", eip);	
+					DL_DELETE(ski_preeemption_by_eip, first);
+					do_preemption=1;
+				}
+				*/
+
+				DL_FOREACH(head,el){
+					if(el->eip == explicit_eip){
+						SKI_TRACE("helper_ski_instrument_possible_inversion_point: reached preemption by eip %x\n", el->eip);	
+						DL_DELETE(ski_preeemption_by_eip, el);
+						do_preemption=1;
+						break;
+					}
+				}
+			}
+
+			if(unlikely(do_preemption)){
+				EIP = explicit_eip;
+				cpu_synchronize_all_states();
+				ski_loop_flush();
+				ski_threads_invert_priority(env);
+
+				if(!ski_init_options_preemption_by_eip){ 
+					int next_preemption_point = ski_preemption_get_and_clear_lowest(env, env->ski_cpu.nr_max_instr);
+					CPUState *penv = first_cpu;
+					while (penv) {
+						if(penv->ski_active == true){
+							penv->ski_cpu.nr_max_instr = next_preemption_point;
+						}
+						penv = (CPUState *)penv->next_cpu;
+					}
+					//env->ski_cpu.nr_max_instr = next_preemption_point; 
+				}
+
+				cpu_loop_exit(env); 
+			}
+		}
+	}
+}
+
+static inline void ski_exec_trace_print_entry(FILE *fd, int explicit_eip){
+	assert(fd);
+#ifndef SKI_DISABLE_TRACE_OUTPUT
+	if(ski_init_options_trace_instructions_enabled){
+		fprintf(fd,"%d %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n",
+			(int) env->cpu_index,
+			(int) explicit_eip,
+			(int) EAX,
+			(int) EBX,
+			(int) ECX,
+			(int) EDX,
+			(int) ESP,
+			(int) EBP,
+			(int) ESI,
+			(int) EDI,
+			(int) env->segs[R_CS].selector,
+			(int) env->segs[R_SS].selector,
+			(int) env->segs[R_DS].selector,
+			(int) env->cr[3],
+			(int) env->gdt.base);
+	}
+#endif
+}
+
+void helper_ski_instrument_pause(void){
+	if(likely(env->ski_active == false)){
+		return;
+	}
+
+	SKI_TRACE("helper_ski_instrument_pause (last_pause: %d, ski_exec_instruction_counter_total: %d)\n", ski_get_current_thread()->last_pause, ski_exec_instruction_counter_total);
+
+	if(ski_get_current_thread()->last_pause + SKI_MAX_LIVENESS_PAUSE_DISTANCE >= ski_exec_instruction_counter_total){
+		int is_pause = 1;
+
+		// Found another pause instruction shortly before -> wait for the current read_set
+		ski_get_current_thread()->last_pause = ski_exec_instruction_counter_total;
+
+		cpu_synchronize_all_states();
+		ski_loop_flush();
+		SKI_TRACE("helper_ski_instrument_pause: waiting for RS on pause\n");
+		ski_threads_self_wait_rs(env, is_pause);
+		//cpu_loop_exit(env); // This line could create a bug
+		// Does not return
+	}else{
+		ski_get_current_thread()->last_pause = ski_exec_instruction_counter_total;
+		ski_liveness_reset(&env->ski_cpu.cpu_rs);
+	}
+}
+
+void helper_ski_instrument_pause_pos(int explicit_eip){
+    if(likely(env->ski_active == false)){
+		return;
+	}
+
+	// Exit to check whether we should switch to another CPUi
+	EIP = explicit_eip + 2; // 2 bytes for the pause (this way we avoid repeating it)
+	cpu_synchronize_all_states();
+	ski_loop_flush();
+	cpu_loop_exit(env);
+}
+
+
+static inline void ski_do_hlt(void){
+    if(likely(env->ski_active == false)){
+		return;
+	}
+
+	SKI_TRACE("ski_do_hlt: waiting for interrupt\n");
+
+	ski_threads_self_wait_hlt(env);
+
+	// TODO: Confirm that we don't need to update the EIP
+	cpu_synchronize_all_states();
+	ski_loop_flush();
+	// No need to call  cpu_loop_exit() (because caller does)
+}
+
+void helper_ski_instrument_all(int explicit_eip)
+{
+	ski_last_eip = explicit_eip;
+	if(likely(env->ski_active == false)){
+		return;
+	}else{
+		ski_exec_instruction_counter_total++;
+		ski_exec_instruction_counter_per_cycle++;  // This one is reset when we loop in cpu-exec.c (not very usefull)
+
+		ski_sched_instructions_current++;  // Name doesn't make sense and (but it's not equal to variable "ski_exec_instruction_counter"). Maybe rename it (need to update hte scripts that rely on the output).
+
+		ski_instruction_detector_new_access(&ski_stats_get_self()->id, explicit_eip);
+
+        if(unlikely(ski_threads_adjust_priority_current(env)))
+        {   
+			EIP = explicit_eip;
+			cpu_synchronize_all_states();
+			ski_loop_flush();
+			SKI_TRACE("ski_sched_instructions_total = %d, ski_sched_instructions_current = %d\n", ski_sched_instructions_total, ski_sched_instructions_current);
+			ski_exec_trace_print_comment((char *)"Adjusted priorities");
+			SKI_TRACE("helper_ski_instrument_all: adjusted priorities\n");
+			//ski_sched_run_next(env, "starvation adjustment"); // FIXME: Exit needs to sync
+			// TODO: Performance optimization: Check that the runnable thread actually changed, if not skip the jump
+			cpu_loop_exit(env);
+       }
+
+		if(ski_exec_trace_execution_fd && (ski_exec_trace_nr_entries < SKI_EXEC_TRACE_MAX_ENTRIES)){
+			// Format: <VCPU> <EIP> <EAX> <EBX> <ECX> <EDX> <CS> <SS> <DS> <CR3> <GDT.Base>
+			if(ski_forkall_enabled){
+				ski_stats_add_instruction_access(explicit_eip);
+			}
+#ifdef SKI_LOOP_ENABLED
+#ifndef SKI_DISABLE_TRACE_OUTPUT
+			int ret = ski_loop_add_instruction(explicit_eip);
+#else	// SKI_DISABLE_TRACE_OUTPUT
+			int ret = 1;
+#endif	// SKI_DISABLE_TRACE_OUTPUT
+#else
+			int ret = 1;
+#endif
+			if(ret == 1){
+				ski_exec_trace_print_entry(ski_exec_trace_execution_fd, explicit_eip);
+				if(ski_exec_trace_nr_entries == (SKI_EXEC_TRACE_MAX_ENTRIES - 1)){
+#ifdef SKI_LOOP_ENABLED
+#ifndef SKI_DISABLE_TRACE_OUTPUT
+					ski_loop_flush();
+#endif
+#endif
+					ski_exec_trace_print_comment((char*)"Max entries in trace reached");
+					ski_exec_trace_flush();
+					//sync();
+				}
+				ski_exec_trace_nr_entries++;
+			}
+		}
+	}
+
+}
+
+// PF: ==========================
+
+// PF: --------------- Loop detection -----------------
+
+static inline void ski_loop_debug_dump(void){
+    int i;
+    SKI_LOOP_TRACE("-----------\nski_loop_debug_dump:\n");
+    for (i=0; i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        ski_loop_execution_context *e = &ski_loop_log[i];
+        SKI_LOOP_TRACE("e->count = %d, e->eip = %d\n", e->count, e->eip);
+    }
+    SKI_LOOP_TRACE("-----------\n");
+
+}
+
+static inline void ski_loop_store_instruction(ski_loop_execution_context* c, int explicit_eip, int update_if_exists){
+    if(c->eip!=explicit_eip || c->count<=0){
+        c->count = 1;
+		c->vcpu = env->cpu_index;
+        c->eip = explicit_eip;
+        c->eax = EAX;
+        c->ebx = EBX;
+        c->ecx = ECX;
+        c->edx = EDX;
+        c->esp = ESP;
+        c->ebp = EBP;
+        c->esi = ESI;
+        c->edi = EDI;
+        c->cs = env->segs[R_CS].selector;
+        c->ss = env->segs[R_SS].selector;
+        c->ds = env->segs[R_DS].selector;
+        c->cr3 = env->cr[3];
+        c->gdt = env->gdt.base;
+    }else{
+        c->count++;
+		if(update_if_exists){
+			c->vcpu = env->cpu_index;
+			c->eip = explicit_eip;
+			c->eax = EAX;
+			c->ebx = EBX;
+			c->ecx = ECX;
+			c->edx = EDX;
+			c->esp = ESP;
+			c->ebp = EBP;
+			c->esi = ESI;
+			c->edi = EDI;
+			c->cs = env->segs[R_CS].selector;
+			c->ss = env->segs[R_SS].selector;
+			c->ds = env->segs[R_DS].selector;
+			c->cr3 = env->cr[3];
+			c->gdt = env->gdt.base;
+		}
+    }
+}
+
+void ski_loop_init(void){
+#ifdef SKI_LOOP_ENABLED
+    int i;
+    for (i=0; i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        ski_loop_execution_context *e = &ski_loop_log[i];
+        e->count = 0;
+    }
+	ski_loop_print_reset_all();
+#ifdef SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED
+	ski_fd_loop_debug_rawinput = fopen("loop_debug_rawinput.txt","wt");
+	ski_fd_loop_debug_decompress = fopen("loop_debug_decompress.txt","wt");
+	assert(ski_fd_loop_debug_rawinput && ski_fd_loop_debug_rawinput);
+#endif //SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED
+
+#endif //SKI_LOOP_ENABLED
+}
+
+void ski_loop_flush(void){
+#ifdef SKI_LOOP_ENABLED
+#ifndef SKI_DISABLE_TRACE_OUTPUT
+	ski_loop_print_reset_all();
+	//fsync(0);
+	//sync();
+#endif
+#endif 
+}
+
+void ski_loop_finish(void){
+#ifdef SKI_LOOP_ENABLED
+#ifdef SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED
+	if(ski_fd_loop_debug_rawinput){
+		fclose(ski_fd_loop_debug_rawinput);
+		ski_fd_loop_debug_rawinput = 0;
+	}
+	if(ski_fd_loop_debug_decompress){
+		fclose(ski_fd_loop_debug_decompress);
+		ski_fd_loop_debug_decompress = 0;
+	}
+#endif //SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED
+	ski_loop_flush();
+#endif //SKI_LOOP_ENABLED
+}
+
+static inline int ski_loop_find_entry(int eip){
+    int i;
+    for (i=0; i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        ski_loop_execution_context *e = &ski_loop_log[i];
+		//XXX: This can be improved to consider the other registers
+        if(e->count > 0 && e->eip==eip){
+            return i;
+        }
+    }
+    return -1;
+}
+
+static inline void ski_loop_debug_print_entry(ski_loop_execution_context *c, FILE *fd){
+    if(c->count>0){
+#ifndef SKI_DISABLE_TRACE_OUTPUT
+		fprintf(fd, "%d %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n",
+		//fprintf(ski_trace_execution_fd,"%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			c->vcpu,
+			c->eip,
+			c->eax,
+			c->ebx,
+			c->ecx,
+			c->edx,
+			c->esp,
+			c->ebp,
+			c->esi,
+			c->edi,
+			c->cs,
+			c->ss,
+			c->ds,
+			c->cr3,
+			c->gdt );
+#endif
+	}
+}
+
+
+static inline void ski_loop_print_entry(ski_loop_execution_context *c){
+    if(c->count>0){
+		ski_loop_debug_print_entry(c, ski_exec_trace_execution_fd);
+		ski_exec_trace_nr_entries++;        
+    }
+}
+
+static inline void ski_loop_print_reset_all(void){
+    // Prints all entries in the log and clears it
+    int old_pos = ski_loop_log_head;
+    int i;
+    int count_min=-1;
+    int count_max=-1;
+    int first_max_pos = -1;
+
+    SKI_LOOP_TRACE("ski_loop_print_reset_all\n");
+    ski_loop_debug_dump();
+    for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        int pos = (i + old_pos + 1);
+        ski_loop_execution_context *e = &ski_loop_log[pos % SKI_LOOP_MAX_LOG_ENTRIES];
+        if(e->count>0){
+            count_min = (count_min <= 0 ? e->count : (e->count < count_min ? e->count : count_min)) ; // MIN
+            first_max_pos = (count_max< e->count) ? pos : first_max_pos;
+            count_max = (count_max <= 0 ? e->count : (e->count > count_max ? e->count : count_max)) ; // MAX
+        }
+        SKI_LOOP_TRACE("min %d max %d e %d\n",count_min , count_max, e->count);
+    }
+    if(count_max - count_min>1){
+        SKI_LOOP_TRACE("ERROR: Something wrong here (count_min: %d, count_max: %d)\n", count_min, count_max);
+        assert(0);
+    }
+    SKI_LOOP_TRACE("Count (count_min: %d, count_max: %d)\n", count_min, count_max);
+
+    // If there is nothing accumulated, leave
+    if(count_min - SKI_LOOP_INTERATIONS_ACTIVATE<0){
+        for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+            ski_loop_execution_context *e = &ski_loop_log[(i + old_pos + 1) % SKI_LOOP_MAX_LOG_ENTRIES];
+            e->count = 0;
+        }
+        ski_loop_log_head = -1;
+        return;
+    }
+
+    // Print the loop
+    if((count_min - SKI_LOOP_INTERATIONS_ACTIVATE) >= 1){
+		char str[128];
+        ski_exec_trace_print_comment((char*)"=== Loop start ===");
+        for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+            int pos = first_max_pos + i;
+            ski_loop_execution_context *e = &ski_loop_log[pos % SKI_LOOP_MAX_LOG_ENTRIES];
+            if(e->count >= count_min){
+                ski_loop_print_entry(e);
+            }
+        }
+		sprintf(str, "=== Loop end (repeated %d times) ===", count_min - SKI_LOOP_INTERATIONS_ACTIVATE);
+        ski_exec_trace_print_comment(str);
+    }
+
+
+    // Print tail if necessary
+    if(count_min != count_max){
+        for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+            int pos = i + old_pos + 1;
+            ski_loop_execution_context *e = &ski_loop_log[pos % SKI_LOOP_MAX_LOG_ENTRIES];
+            if(e->count == count_max){
+                ski_loop_print_entry(e);
+            }
+        }
+        // Only mark it as being a loop tail if the begin/end loop comments were printed out
+        if((count_min - SKI_LOOP_INTERATIONS_ACTIVATE) > 0){
+            ski_exec_trace_print_comment((char *)"=== Loop tail end ===");
+        }
+    }
+
+    /* <TESTING> Uncompress the values */
+#ifdef SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED
+		int j;
+		int found_loop_end=0;
+        for(j=0;j<count_min - SKI_LOOP_INTERATIONS_ACTIVATE;j++){
+            for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+                int pos = first_max_pos + i;
+                ski_loop_execution_context *e = &ski_loop_log[pos % SKI_LOOP_MAX_LOG_ENTRIES];
+                if(e->count >= count_min){
+                    ski_loop_debug_print_entry(e, ski_fd_loop_debug_decompress);
+                }
+            }
+        }
+        if(count_min != count_max){
+            for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+                int pos = i + old_pos + 1;
+                ski_loop_execution_context *e = &ski_loop_log[pos % SKI_LOOP_MAX_LOG_ENTRIES];
+                if(e->count == count_max){
+                    ski_loop_debug_print_entry(e, ski_fd_loop_debug_decompress);
+                }
+            }
+        }
+#endif
+
+    // Reset all entries
+    for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        ski_loop_execution_context *e = &ski_loop_log[(i) % SKI_LOOP_MAX_LOG_ENTRIES];
+        e->count = 0;
+    }
+    ski_loop_log_head = -1;
+}
+
+//  If there are entries with count==1 then it means that we have a loop to print and should clear all the log afterwards
+static inline void ski_loop_print_reset_range(int reset_start, int reset_end){
+    int i;
+
+    // Checks to see if there are loops in the log that should be printed out
+    for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        int next_pos = (i + reset_start) % SKI_LOOP_MAX_LOG_ENTRIES;
+        ski_loop_execution_context * e = &ski_loop_log[next_pos];
+        if(e->count > SKI_LOOP_INTERATIONS_ACTIVATE){
+            ski_loop_print_reset_all();
+            break;
+        }
+        if(next_pos == reset_end){
+            break;
+        }
+    }
+
+    // Clear the range of entries specified
+    for(i=0;i<SKI_LOOP_MAX_LOG_ENTRIES;i++){
+        int next_pos = (i+reset_start)%SKI_LOOP_MAX_LOG_ENTRIES;
+        ski_loop_execution_context*e = &ski_loop_log[next_pos];
+        e->count = 0;
+        SKI_LOOP_TRACE("ski_loop_print_reset_range: reset entry %d\n", next_pos);
+        if(next_pos == reset_end){
+            break;
+        }
+    }
+}
+
+static inline int ski_loop_equal_vcpu_regs(int existing_pos, int eip){
+	ski_loop_execution_context *c = &ski_loop_log[existing_pos];
+
+    if( c->vcpu == env->cpu_index
+#ifndef SKI_LOOP_CMP_IGNORE_REGISTERS
+		&&  c->eax == EAX && 
+        c->ebx == EBX && 
+        c->ecx == ECX && 
+        c->edx == EDX && 
+        c->esp == ESP && 
+        c->ebp == EBP && 
+        c->esi == ESI && 
+        c->edi == EDI && 
+        c->cs == env->segs[R_CS].selector && 
+        c->ss == env->segs[R_SS].selector && 
+        c->ds == env->segs[R_DS].selector && 
+        c->cr3 == env->cr[3] && 
+        c->gdt == env->gdt.base
+#endif
+		){
+		return 1;
+	}
+    return 0;
+}
+
+static inline void ski_loop_debug_print_context(FILE* fd, int explicit_eip){
+#ifdef SKI_LOOP_DEBUG_OUTPUT_DECOMPRESSED
+	ski_exec_trace_print_entry(fd, explicit_eip);
+#endif
+}
+
+// Return 1 if the caller should print out the instruction
+// Return 0 if the caller should not print out the instruction (because it's being compressed)
+static inline int ski_loop_add_instruction(int explicit_eip){
+    int existing_pos = ski_loop_find_entry(explicit_eip);
+    int old_pos = ski_loop_log_head;
+    int new_pos = -1;
+    SKI_LOOP_TRACE("=========================================================\n");
+    SKI_LOOP_TRACE("Trying to parse the instruction: %d\n", explicit_eip);
+	ski_loop_debug_print_context(ski_fd_loop_debug_rawinput, explicit_eip);
+    ski_loop_debug_dump();
+    if (old_pos<0){
+        SKI_LOOP_TRACE("First entry\n");
+        // If the first entry in the log
+        new_pos = 0;
+        ski_loop_store_instruction(&ski_loop_log[new_pos],explicit_eip, 0);
+		ski_loop_debug_print_context(ski_fd_loop_debug_decompress, explicit_eip);
+        ski_loop_log_head = new_pos;
+        return 1;
+    }
+#ifdef SKI_LOOP_CMP_IGNORE_REGISTERS
+	int update_registers = 1;
+#else
+	int update_registers = 0;
+#endif
+
+    if ((existing_pos >= 0) && (ski_loop_equal_vcpu_regs(existing_pos, explicit_eip)==1)){
+        // Jumping to a position already in the log
+        SKI_LOOP_TRACE("Jumping to a position already in the log\n");
+        new_pos = existing_pos;
+        if (new_pos == (old_pos+1)%SKI_LOOP_MAX_LOG_ENTRIES){
+            // Jumping to the next position in the log
+            SKI_LOOP_TRACE("Jumping to the next position\n");
+            ski_loop_log_head = new_pos;
+            if (ski_loop_log[new_pos].count >= SKI_LOOP_INTERATIONS_ACTIVATE){
+				ski_loop_store_instruction(&ski_loop_log[new_pos],explicit_eip, 0);
+				if(ski_loop_log[new_pos].count % SKI_DEBUG_LOOP_CYCLE_IN_PROGREESS == 0){
+					char debug[128];
+					sprintf(debug, "Loop in progress (iterations=%d)", ski_loop_log[new_pos].count);
+					ski_exec_trace_print_comment(debug);
+				}
+                return 0;
+            }
+			ski_loop_store_instruction(&ski_loop_log[new_pos],explicit_eip, update_registers);
+			ski_loop_debug_print_context(ski_fd_loop_debug_decompress, explicit_eip);
+            return 1;
+        }else{
+            // Jumping to a distante position
+            SKI_LOOP_TRACE("Jumping over (old_pos: %d new_pos: %d)\n",old_pos, new_pos);
+            ski_loop_print_reset_range((old_pos + 1) % SKI_LOOP_MAX_LOG_ENTRIES, (new_pos - 1 + SKI_LOOP_MAX_LOG_ENTRIES) % SKI_LOOP_MAX_LOG_ENTRIES);
+            ski_loop_log_head = new_pos;
+            if (ski_loop_log[new_pos].count >= SKI_LOOP_INTERATIONS_ACTIVATE){
+				ski_loop_store_instruction(&ski_loop_log[new_pos],explicit_eip, 0);
+				return 0;
+            }
+			ski_loop_store_instruction(&ski_loop_log[new_pos],explicit_eip, update_registers);
+			ski_loop_debug_print_context(ski_fd_loop_debug_decompress, explicit_eip);
+            return 1;
+        }
+    }else{
+        SKI_LOOP_TRACE("Adding a new instruction to the buffer\n");
+        if (ski_loop_log[old_pos].count>1) {
+            // We should print out the results of the loop and reset it
+            // All entries should have the same count, because when we detect a new loop we clear all the other entries
+            ski_loop_print_reset_all();
+        }
+        old_pos = ski_loop_log_head;
+        new_pos = (old_pos + 1) % SKI_LOOP_MAX_LOG_ENTRIES;
+//        ski_loop_store_instruction(&ski_loop_log[new_pos], explicit_eip, update_registers);
+        ski_loop_store_instruction(&ski_loop_log[new_pos], explicit_eip, 0);
+		ski_loop_debug_print_context(ski_fd_loop_debug_decompress, explicit_eip);
+        ski_loop_log_head = new_pos;
+        return 1;
+    }
+}
+// PF: --------------- Loop detection -----------------
 
 /* n must be a constant to be efficient */
 static inline target_long lshift(target_long x, int n)
@@ -210,11 +1095,15 @@ static spinlock_t global_cpu_lock = SPIN_LOCK_UNLOCKED;
 
 void helper_lock(void)
 {
+	//SKI_TRACE("Lock [CR3: %d, EAX: %d]\n", env->cr[3], EAX);
+	//cpu_set_log(CPU_LOG_INT | CPU_LOG_TB_IN_ASM);
     spin_lock(&global_cpu_lock);
 }
 
 void helper_unlock(void)
 {
+	//SKI_TRACE("Unlock [CR3: %d, EAX: %d]\n", env->cr[3], EAX);
+	//cpu_set_log(0);
     spin_unlock(&global_cpu_lock);
 }
 
@@ -766,6 +1655,15 @@ static void do_interrupt_protected(int intno, int is_int, int error_code,
     int has_error_code, new_stack, shift;
     uint32_t e1, e2, offset, ss = 0, esp, ss_e1 = 0, ss_e2 = 0;
     uint32_t old_eip, sp_mask;
+	
+	if(env->ski_active == true){
+		char debug[256];
+		ski_loop_flush();
+		sprintf(debug, "Executing interrupt handler (intno=%d, is_int=%d, error_code=%d, next_eip=%x, is_hw=%d)", intno, is_int, error_code, next_eip, is_hw);
+		SKI_TRACE_ACTIVE("%s\n", debug);
+		ski_exec_trace_print_comment(debug);
+		ski_handle_interrupt_begin(env,intno, is_int, is_hw);
+	}
 
     has_error_code = 0;
     if (!is_int && !is_hw)
@@ -948,6 +1846,21 @@ static void do_interrupt_protected(int intno, int is_int, int error_code,
         env->eflags &= ~IF_MASK;
     }
     env->eflags &= ~(TF_MASK | VM_MASK | RF_MASK | NT_MASK);
+	// PF:
+//	SKI_TRACE("Entered a system call (int) [CR3: %d, EAX: %d, intno: %d, is_int: %d, error_code: %d, next_eip: %d, is_hw: %d]\n", (int) env->cr[3], (int) EAX, (int) intno, is_int, error_code, next_eip, is_hw);
+	if(ski_correct_thread()==false){
+		if(env->ski_active == true){
+			env->ski_cpu.nr_interrupts_other++;
+		}
+		return;
+	}else{
+		env->ski_cpu.nr_interrupts_self++;
+	}
+	
+	if(!is_hw && is_int && intno == SPIKE_KERNEL_SYSCALL_INT){
+	// Check if its for the right process/thread
+		//TODO: ski_system_call_enter();
+	}
 }
 
 #ifdef TARGET_X86_64
@@ -2731,6 +3644,7 @@ static inline void helper_ret_protected(int shift, int is_iret, int addend)
     int cpl, dpl, rpl, eflags_mask, iopl;
     target_ulong ssp, sp, new_eip, new_esp, sp_mask;
 
+
 #ifdef TARGET_X86_64
     if (shift == 2)
         sp_mask = -1;
@@ -2942,6 +3856,27 @@ void helper_iret_protected(int shift, int next_eip)
         helper_ret_protected(shift, 1, 0);
     }
     env->hflags2 &= ~HF2_NMI_MASK;
+
+	// PF:
+	//SKI_TRACE("Left a system call (iret) [CR3: %d, EAX: %d]\n", (int) env->cr[3], (int) EAX);
+
+	//PF: 
+    if(env->ski_active == true){
+        char debug[256];
+
+   		CC_OP = CC_OP_EFLAGS;
+		ski_loop_flush();
+		cpu_synchronize_all_states();
+
+		sprintf(debug, "Returning from interrupt handler");
+        //SKI_TRACE_ACTIVE("%s\n", debug);
+        ski_exec_trace_print_comment(debug);
+        ski_handle_interrupt_end(env);
+
+		cpu_loop_exit(env);
+		return;
+    }
+
 }
 
 void helper_lret_protected(int shift, int addend)
@@ -2980,7 +3915,11 @@ void helper_sysenter(void)
                            DESC_W_MASK | DESC_A_MASK);
     ESP = env->sysenter_esp;
     EIP = env->sysenter_eip;
+	// PF:
+//	SKI_TRACE("Entered a system call (sysenter) [CR3: %d, EAX: %d]\n", (int) env->cr[3], (int) EAX);
+	ski_syscall_enter();
 }
+
 
 void helper_sysexit(int dflag)
 {
@@ -3019,6 +3958,9 @@ void helper_sysexit(int dflag)
     }
     ESP = ECX;
     EIP = EDX;
+	// PF:
+//	SKI_TRACE("Left a system call (sysexit) [CR3: %d, EAX: %d]\n", (int) env->cr[3], (int) EAX);
+	ski_syscall_exit();
 }
 
 #if defined(CONFIG_USER_ONLY)
@@ -3131,6 +4073,7 @@ void helper_rdtsc(void)
     val = cpu_get_tsc(env) + env->tsc_offset;
     EAX = (uint32_t)(val);
     EDX = (uint32_t)(val >> 32);
+	//SKI_TRACE("helper_rdtsc: EDX=%x, EAX=%x (env->tsc_offset=%ld)\n", EAX, EDX, env->tsc_offset);
 }
 
 void helper_rdtscp(void)
@@ -4867,6 +5810,9 @@ static void do_hlt(void)
     env->hflags &= ~HF_INHIBIT_IRQ_MASK; /* needed if sti is just before */
     env->halted = 1;
     env->exception_index = EXCP_HLT;
+	if(unlikely(env->ski_active)){
+		ski_do_hlt();
+	}
     cpu_loop_exit(env);
 }
 
@@ -4926,11 +5872,29 @@ void helper_raise_exception(int exception_index)
 void helper_cli(void)
 {
     env->eflags &= ~IF_MASK;
+	//PF: TODO: Increase the probability of inversion point here?!
+	if(env->ski_active == true){
+        SKI_TRACE_ACTIVE("helper_cli: Instruction CLI executed\n");
+	}
 }
 
 void helper_sti(void)
 {
     env->eflags |= IF_MASK;
+	
+	//PF:
+	//XXX: This could interfere with the call to helper_set_inhibit_irq(); 
+	//     but hope it doesn't if we don't use the cpu_loop_exit()
+	if(env->ski_active == true){
+        cpu_synchronize_all_states();
+
+        SKI_TRACE_ACTIVE("helper_sti: Instruction STI executed\n");
+        ski_threads_reevaluate(env);
+
+        //cpu_loop_exit(env);
+        return;
+	}
+
 }
 
 #if 0

@@ -178,12 +178,22 @@ int inet_listen_opts(QemuOpts *opts, int port_offset)
 #endif
 
         for (;;) {
-            if (bind(slisten, e->ai_addr, e->ai_addrlen) == 0) {
-                if (sockets_debug)
-                    fprintf(stderr,"%s: bind(%s,%s,%d): OK\n", __FUNCTION__,
-                        inet_strfamily(e->ai_family), uaddr, inet_getport(e));
-                goto listen;
-            }
+			// SKI
+			int ski_max_bind_attempts = 200;
+
+			while(ski_max_bind_attempts){
+
+				if (bind(slisten, e->ai_addr, e->ai_addrlen) == 0) {
+					if (sockets_debug)
+						fprintf(stderr,"%s: bind(%s,%s,%d): OK\n", __FUNCTION__,
+							inet_strfamily(e->ai_family), uaddr, inet_getport(e));
+					goto listen;
+				}
+				ski_max_bind_attempts--;
+				printf("SKI: Trying to bind again... (%d)\n", ski_max_bind_attempts);
+				sleep(1);
+
+			}
             try_next = to && (inet_getport(e) <= to + port_offset);
             if (!try_next || sockets_debug)
                 fprintf(stderr,"%s: bind(%s,%s,%d): %s\n", __FUNCTION__,

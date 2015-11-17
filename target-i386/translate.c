@@ -75,6 +75,8 @@ static uint8_t gen_opc_cc_op[OPC_BUF_SIZE];
 
 #include "gen-icount.h"
 
+#include "ski-ipfilter.h"
+
 #ifdef TARGET_X86_64
 static int x86_64_hregs;
 #endif
@@ -179,6 +181,61 @@ enum {
     OR_TMP1,
     OR_A0, /* temporary register used when doing address evaluation */
 };
+
+
+
+
+
+#ifdef SKI_MEMORY_INTERCEPT
+#ifndef TARGET_X86_64
+	// XXX: Need to be carefull with the order
+	// XXX: This may be buggy, with the order changed sometimes get errors on a callN op form the intermediate representation (probably during the call to the handler)
+	#define SKI_INTERCEPT_QEMU_MEM_TRACE(function, is_load, bits)												\
+		 static inline void ski_##function(TCGv ret, TCGv addr, int mem_index){								\
+			/*function(ret,addr,mem_index);*/																	\
+			if(is_load){																						\
+				function(ret,addr,mem_index);																	\
+				if(unlikely(ski_exec_trace_execution_fd)){													\
+					gen_helper_ski_load_access(addr, ret, tcg_const_i32(mem_index), tcg_const_i32(bits));		\
+				}																								\
+			}																									\
+			if(!is_load){																						\
+				if(unlikely(ski_exec_trace_execution_fd)){													\
+					gen_helper_ski_store_access(addr, ret, tcg_const_i32(mem_index), tcg_const_i32(bits));	\
+				}																								\
+				function(ret,addr,mem_index);																	\
+			}																									\
+		}																										\
+
+
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_st8, 0, 8)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_st16, 0, 16)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_st32, 0, 32)
+	//SKI_INTERCEPT_MEM_TRACE(tcg_gen_qemu_st64, 0, 64)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_ld8u, 1, 8)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_ld16u, 1, 16)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_ld32u, 1, 32)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_ld8s, 1, 8)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_ld16s, 1, 16)
+	SKI_INTERCEPT_QEMU_MEM_TRACE(tcg_gen_qemu_ld32s, 1, 32)
+	//SKI_INTERCEPT_MEM_TRACE(tcg_gen_qemu_st64, 1, 64)
+
+	#define tcg_gen_qemu_st8 ski_tcg_gen_qemu_st8
+	#define tcg_gen_qemu_st16 ski_tcg_gen_qemu_st16
+	#define tcg_gen_qemu_st32 ski_tcg_gen_qemu_st32
+
+	#define tcg_gen_qemu_ld8u ski_tcg_gen_qemu_ld8u
+	#define tcg_gen_qemu_ld16u ski_tcg_gen_qemu_ld16u
+	#define tcg_gen_qemu_ld32u ski_tcg_gen_qemu_ld32u
+
+	#define tcg_gen_qemu_ld8s ski_tcg_gen_qemu_ld8s
+	#define tcg_gen_qemu_ld16s ski_tcg_gen_qemu_ld16s
+	#define tcg_gen_qemu_ld32s ski_tcg_gen_qemu_ld32s
+
+#endif
+#endif
+
+
 
 static inline void gen_op_movl_T0_0(void)
 {
@@ -4083,8 +4140,33 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
 
     if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP)))
         tcg_gen_debug_insn_start(pc_start);
+   
+    //SKI
+	// TODO: Make this also work with the range ip filter
+	ski_ipfilter_hash_entry *e;
+	if(ski_ipfilter_hash){
+		int eip = pc_start;
+		//printf("About to do HASH_FIND_INT (ski_ipfilter_hash: %x, eip: %x\n", ski_ipfilter_hash, eip);
+		HASH_FIND_INT(ski_ipfilter_hash, &eip, e);
+		if(e){
+			if (s->cc_op != CC_OP_DYNAMIC)
+				gen_op_set_cc_op(s->cc_op);
+			gen_helper_ski_instrument_possible_inversion_point(tcg_const_i32(pc_start));
+		}
+	}
+	if(unlikely(ski_exec_trace_execution_fd)){
+	    if (s->cc_op != CC_OP_DYNAMIC)
+	        gen_op_set_cc_op(s->cc_op);
+
+		gen_helper_ski_instrument_all(tcg_const_i32(pc_start));
+	}
+
+	 //SKI
+
     s->pc = pc_start;
-    prefixes = 0;
+
+
+	prefixes = 0;
     aflag = s->code32;
     dflag = s->code32;
     s->override = -1;
@@ -5068,7 +5150,9 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         /* mov */
     case 0x88:
     case 0x89: /* mov Gv, Ev */
-        if ((b & 1) == 0)
+        //gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
+		if ((b & 1) == 0)
             ot = OT_BYTE;
         else
             ot = dflag + OT_WORD;
@@ -5080,6 +5164,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         break;
     case 0xc6:
     case 0xc7: /* mov Ev, Iv */
+        //gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
         if ((b & 1) == 0)
             ot = OT_BYTE;
         else
@@ -5099,6 +5185,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         break;
     case 0x8a:
     case 0x8b: /* mov Ev, Gv */
+        //gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
         if ((b & 1) == 0)
             ot = OT_BYTE;
         else
@@ -5110,6 +5198,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         gen_op_mov_reg_T0(ot, reg);
         break;
     case 0x8e: /* mov seg, Gv */
+        //gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
         modrm = ldub_code(s->pc++);
         reg = (modrm >> 3) & 7;
         if (reg >= 6 || reg == R_CS)
@@ -5130,6 +5220,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         }
         break;
     case 0x8c: /* mov Gv, seg */
+        //gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
         modrm = ldub_code(s->pc++);
         reg = (modrm >> 3) & 7;
         mod = (modrm >> 6) & 3;
@@ -5149,6 +5241,9 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
     case 0x1bf: /* movswS Gv, Eb */
         {
             int d_ot;
+
+			//gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
             /* d_ot is the size of destination */
             d_ot = dflag + OT_WORD;
             /* ot is the size of source */
@@ -5211,6 +5306,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         {
             target_ulong offset_addr;
 
+			//gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
             if ((b & 1) == 0)
                 ot = OT_BYTE;
             else
@@ -5264,6 +5361,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         gen_op_mov_reg_T0(OT_BYTE, R_EAX);
         break;
     case 0xb0 ... 0xb7: /* mov R, Ib */
+		//gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
         val = insn_get(s, OT_BYTE);
         gen_op_movl_T0_im(val);
         gen_op_mov_reg_T0(OT_BYTE, (b & 7) | REX_B(s));
@@ -5281,6 +5380,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         } else
 #endif
         {
+			//gen_helper_ski_instrument_mov(tcg_const_i32(pc_start)); //PF: 
+
             ot = dflag ? OT_LONG : OT_WORD;
             val = insn_get(s, ot);
             reg = (b & 7) | REX_B(s);
@@ -6668,7 +6769,9 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
             goto do_xchg_reg_eax;
         }
         if (prefixes & PREFIX_REPZ) {
+			gen_helper_ski_instrument_pause();
             gen_svm_check_intercept(s, pc_start, SVM_EXIT_PAUSE);
+			gen_helper_ski_instrument_pause_pos(tcg_const_i32(pc_start));
         }
         break;
     case 0x9b: /* fwait */

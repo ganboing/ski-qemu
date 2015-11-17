@@ -65,6 +65,7 @@ void configure_alarms(char const *opt);
 int qemu_calculate_timeout(void);
 void init_clocks(void);
 int init_timer_alarm(void);
+int ski_forkall_reinit_timer_alarm(void);
 
 int64_t cpu_get_ticks(void);
 void cpu_enable_ticks(void);
@@ -196,16 +197,89 @@ static inline int64_t cpu_get_real_ticks(void)
 
 #elif defined(__x86_64__)
 
+/*
+  SKI version with FIXED increments 
+*/
+
+/* This one may not even be able to boot the machine if the incremeant is too agressive */
+
+/*
 static inline int64_t cpu_get_real_ticks(void)
 {
+	static int64_t ski_rdtsc_acc = 0LL;
+	static int64_t ski_rdtsc_int = 200000000LL;
+	//static int64_t ski_rdtsc_int = 20000000000LL;
     uint32_t low,high;
     int64_t val;
     asm volatile("rdtsc" : "=a" (low), "=d" (high));
     val = high;
     val <<= 32;
     val |= low;
+	ski_rdtsc_acc += ski_rdtsc_int;
+	val += ski_rdtsc_acc;
+	printf("cpu_get_real_ticks : __x86_64_ (original %ld new: %ld)\n", val - ski_rdtsc_acc, val);
     return val;
 }
+*/
+
+
+/*
+	SKI version with proportional time expansion
+	Note: Need to enable "ski_time_expansion_enable = 1"
+
+*/
+
+/*
+extern int ski_time_expansion_enable;
+
+#define SKI_TIME_EXPANSION_FACTOR (256)
+static inline int64_t cpu_get_real_ticks(void)
+{
+//	static int64_t ski_rdtsc_acc = 0LL;
+	static int64_t ski_first_val = 0LL;
+//	static int64_t ski_original_val = 0LL;
+	static int64_t ski_new_val = 0LL;
+
+    uint32_t low,high;
+    int64_t val;
+    asm volatile("rdtsc" : "=a" (low), "=d" (high));
+    val = high;
+    val <<= 32;
+    val |= low;
+
+	if(ski_time_expansion_enable){
+		if((!ski_first_val)){
+			printf("cpu_get_real_ticks : ski time expansion with a factor of: %d\n", SKI_TIME_EXPANSION_FACTOR);
+			ski_first_val = val;
+		}
+
+		ski_new_val = ((val - ski_first_val)* SKI_TIME_EXPANSION_FACTOR) + val;
+		//ski_rdtsc_acc += ski_rdtsc_int;
+		//val += ski_rdtsc_acc;
+		printf("cpu_get_real_ticks : __x86_64_ (returned: %ld original: %ld)\n", ski_new_val , val);
+		val = ski_new_val;
+	}
+    return val;
+}
+
+*/
+
+/*
+	Original version
+*/
+
+static inline int64_t cpu_get_real_ticks(void)
+{
+	uint32_t low,high;
+	int64_t val;
+	asm volatile("rdtsc" : "=a" (low), "=d" (high));
+	val = high;
+	val <<= 32;
+	val |= low;
+	return val;
+}
+
+
 
 #elif defined(__hppa__)
 

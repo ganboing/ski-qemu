@@ -58,6 +58,57 @@ If you're planning to adopt QMP, please observe the following:
 Server's responses in the examples below are always a success response, please
 refer to the QMP specification for more details on error responses.
 
+PF: Command piking-select-cpu
+EQMP
+
+    {
+        .name       = "piking-select-cpu",
+        .args_type  = "cpu-index:i?",
+        .user_print = monitor_user_noop,
+        .mhandler.cmd_new = do_piking_select_cpu,
+    },
+
+SQMP
+piking-select-cpu
+----
+
+Selects a CPU to run, while suspending all the other CPUs. If CPU argument is not specified it resumes all CPUs in the guest.
+
+Arguments: .
+- cpu: cpu to run (json-integer, optional)
+
+Example:
+
+-> { "execute": "piking-select-cpu" , "arguments": { "cpu-index": "0" } }
+<- { "return": {} }
+
+PF: End of command
+
+PF: Command ski-reset
+EQMP
+
+    {
+        .name       = "ski-reset",
+        .args_type  = "",
+        .user_print = monitor_user_noop,
+        .mhandler.cmd_new = do_ski_reset,
+    },
+
+SQMP
+ski-reset
+----
+
+Resets SKI in all CPUs.
+
+Example:
+
+-> { "execute": "ski-reset"}
+<- { "return": {} }
+
+PF: End of command
+
+
+
 EQMP
 
     {

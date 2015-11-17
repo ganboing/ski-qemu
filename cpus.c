@@ -35,6 +35,9 @@
 #include "qemu-thread.h"
 #include "cpus.h"
 #include "main-loop.h"
+#include "ski.h"
+
+#include "forkall-coop.h"
 
 #ifndef _WIN32
 #include "compatfd.h"
@@ -111,6 +114,7 @@ int64_t cpu_get_ticks(void)
         return timers_state.cpu_ticks_offset;
     } else {
         int64_t ticks;
+		//printf("cpu_get_ticks: cpu_get_real_ticks\n");
         ticks = cpu_get_real_ticks();
         if (timers_state.cpu_ticks_prev > ticks) {
             /* Note: non increasing ticks may happen if the host uses
@@ -118,6 +122,7 @@ int64_t cpu_get_ticks(void)
             timers_state.cpu_ticks_offset += timers_state.cpu_ticks_prev - ticks;
         }
         timers_state.cpu_ticks_prev = ticks;
+		//printf("SKI: cpu_get_ticks: ticks = %lx, timers_state.cpu_ticks_offset = %lx\n", ticks, timers_state.cpu_ticks_offset);
         return ticks + timers_state.cpu_ticks_offset;
     }
 }
@@ -309,6 +314,8 @@ void configure_icount(const char *option)
         return;
     }
 
+	printf("[WARNING] SKI: icount may not be supported yet!\n");
+
     icount_warp_timer = qemu_new_timer_ns(rt_clock, icount_warp_rt, NULL);
     if (strcmp(option, "auto") != 0) {
         icount_time_shift = strtol(option, NULL, 0);
@@ -336,6 +343,15 @@ void configure_icount(const char *option)
 }
 
 /***********************************************************/
+
+void ski_enable_clock(void){
+	qemu_clock_enable(vm_clock, true);
+}
+
+void ski_disable_clock(void){
+	qemu_clock_enable(vm_clock, false);
+}
+
 void hw_error(const char *fmt, ...)
 {
     va_list ap;
@@ -622,10 +638,17 @@ void qemu_init_cpu_loop(void)
     qemu_cond_init(&qemu_pause_cond);
     qemu_cond_init(&qemu_work_cond);
     qemu_cond_init(&qemu_io_proceeded_cond);
+
     qemu_mutex_init(&qemu_global_mutex);
 
     qemu_thread_get_self(&io_thread);
 }
+
+void ski_forkall_reinit_qemu_init_cpu_loop(void)
+{
+    qemu_thread_get_self(&io_thread);
+}
+
 
 void run_on_cpu(CPUState *env, void (*func)(void *data), void *data)
 {
@@ -749,16 +772,76 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
 }
 
 static void tcg_exec_all(void);
+/*
+static void ski_setup_max_delay(struct timespec *abstime, long int delay_us){
+    struct timeval now;
+    gettimeofday(&now, NULL);
+
+    printf("getimeofday.tv_sec = %d getitmeofday.tv_usec = %d\n\n", now.tv_sec, now.tv_usec);
+    printf("\n");
+
+
+    clock_gettime(CLOCK_REALTIME, abstime);
+    long int overflow_s = ((abstime->tv_nsec / 1000) + delay_us) / (1000 * 1000);
+
+    printf("abstime->tv_sec = %lld abstime->tv_nsec = %09ld\n", abstime->tv_sec, abstime->tv_nsec);
+    abstime->tv_sec += overflow_s;
+    abstime->tv_nsec = ((abstime->tv_nsec + ((delay_us % (1000*1000))*1000)) % (1000*1000*1000));
+
+    printf("abstime->tv_sec = %lld abstime->tv_nsec = %09ld (after adding %ld us) \n\n", abstime->tv_sec, abstime->tv_nsec, delay_us);
+
+
+}
+*/
+
+void ski_forkall_wait_firstcpu(void)
+{
+/* Obsolete code
+    CPUState *env = first_cpu;
+	sleep(1);
+	int res = qemu_mutex_trylock(&qemu_global_mutex);
+	printf("[SKI] ski_forkall_wait_firstcpu (res = %d)\n", res);
+
+	printf("[SKI] releasing the global mutex\n");
+	qemu_mutex_unlock(&qemu_global_mutex);
+
+
+    qemu_cond_broadcast(env->halt_cond);
+	sleep(1);
+
+	if(res == EBUSY){
+		printf("[SKI] reaquiring lock\n");
+		qemu_mutex_lock(&qemu_global_mutex);
+	}
+*/
+
+}
+
+void ski_forkall_release_locks(void){
+	qemu_mutex_unlock(&qemu_global_mutex);
+}
+
+void ski_forkall_aquire_locks(void){
+	qemu_mutex_lock(&qemu_global_mutex);
+}
+
 
 static void *qemu_tcg_cpu_thread_fn(void *arg)
 {
     CPUState *env = arg;
+
+	if(ski_forkall_enabled){
+		ski_forkall_thread_add_self_tid();
+		//forkall_thread_add_self();
+	}
+
 
     qemu_tcg_init_cpu_signals();
     qemu_thread_get_self(env->thread);
 
     /* signal CPU creation */
     qemu_mutex_lock(&qemu_global_mutex);
+
     for (env = first_cpu; env != NULL; env = env->next_cpu) {
         env->thread_id = qemu_get_thread_id();
         env->created = 1;
@@ -766,9 +849,52 @@ static void *qemu_tcg_cpu_thread_fn(void *arg)
     qemu_cond_signal(&qemu_cpu_cond);
 
     /* wait for initial kick-off after machine start */
-    while (first_cpu->stopped) {
-        qemu_cond_wait(tcg_halt_cond, &qemu_global_mutex);
-    }
+	if(ski_forkall_enabled){
+		qemu_mutex_unlock(&qemu_global_mutex);
+		while (1) {
+			// Original call:
+			//qemu_cond_wait(tcg_halt_cond, &qemu_global_mutex);
+
+			// PF: SKI: busy wait version
+			int did_fork;
+			int is_child;
+
+			ski_forkall_slave(&did_fork, &is_child);
+			if(did_fork){
+				// SKI: This at least contains a race...
+				CPUState *env = arg;
+				//printf("SKI: trying to setup the IPI handler\n");
+				qemu_tcg_init_cpu_signals();
+				qemu_thread_get_self(env->thread);
+				for (env = first_cpu; env != NULL; env = env->next_cpu) {
+					env->thread_id = qemu_get_thread_id();
+				}
+				break;
+			}
+			sleep(0);
+			/*
+			while (qemu_mutex_trylock(&qemu_global_mutex) == EBUSY){
+				sleep(0);
+			}
+			*/
+		}
+		qemu_mutex_lock(&qemu_global_mutex);
+	}
+
+    /* wait for initial kick-off after machine start */
+	while (first_cpu->stopped) {
+		qemu_cond_wait(tcg_halt_cond, &qemu_global_mutex);
+	}
+
+	printf("[SKI] Finished waiting for the initial kick-off\n");
+	printf("[SKI] VM running...\n");
+	/*
+	printf("[WARNING] [SKI] Sleeping for 10 seconds in the CPU thread (tid %d) \n", gettid());
+	fflush(0);
+	sleep(10);
+	printf("[WARNING] [SKI] resuming\n");
+	fflush(0);
+	*/
 
     while (1) {
         tcg_exec_all();
@@ -785,9 +911,12 @@ static void qemu_cpu_kick_thread(CPUState *env)
 {
 #ifndef _WIN32
     int err;
-
-    err = pthread_kill(env->thread->thread, SIG_IPI);
-    if (err) {
+	if(ski_forkall_enabled){
+	    err = ski_forkall_pthread_kill(env->thread->thread, SIG_IPI);
+	}else{
+	    err = pthread_kill(env->thread->thread, SIG_IPI);
+	}
+	if (err) {
         fprintf(stderr, "qemu:%s: %s", __func__, strerror(err));
         exit(1);
     }
@@ -799,6 +928,8 @@ static void qemu_cpu_kick_thread(CPUState *env)
     }
 #endif
 }
+
+
 
 void qemu_cpu_kick(void *_env)
 {
@@ -903,6 +1034,9 @@ void resume_all_vcpus(void)
 static void qemu_tcg_init_vcpu(void *_env)
 {
     CPUState *env = _env;
+
+	//PF:
+	env->ski_active = false;
 
     /* share a single thread for all cpus with TCG */
     if (!tcg_cpu_thread) {
@@ -1022,6 +1156,7 @@ static int tcg_cpu_exec(CPUState *env)
 static void tcg_exec_all(void)
 {
     int r;
+	int ski_iterations_without_running = 0;
 
     /* Account partial waits to the vm_clock.  */
     qemu_clock_warp(vm_clock);
@@ -1035,16 +1170,47 @@ static void tcg_exec_all(void)
         qemu_clock_enable(vm_clock,
                           (env->singlestep_enabled & SSTEP_NOTIMER) == 0);
 
-        if (cpu_can_run(env)) {
+		if(ski_snapshot_restoring && !env->ski_cpu.last_enter_cpu){
+			SKI_TRACE("tcg_exec_all: skipping this CPU (ski_snapshot_restoring)\n");
+			continue;
+		}
+
+		if(ski_snapshot_restoring || (cpu_can_run(env) && ski_cpu_can_run(env))){
+			if(ski_snapshot_restoring){
+				CPUState *penv = first_cpu;
+				// Should only run once per restore
+				SKI_TRACE("tcg_exec_all: initializing all (ski_snapshot_restoring)\n");
+				ski_snapshot_reinitialize(env);
+				while(penv){
+					if(penv->ski_active){
+						SKI_TRACE("tcg_exec_all: initializing CPU %d (ski_snapshot_restoring)\n", penv->cpu_index);
+						ski_snapshot_reinitialize_cpu(penv);
+					}
+					penv = penv->next_cpu;
+				}
+				
+			}
+			ski_iterations_without_running = 0;
             r = tcg_cpu_exec(env);
             if (r == EXCP_DEBUG) {
                 cpu_handle_guest_debug(env);
                 break;
             }
-        } else if (env->stop || env->stopped) {
-            break;
-        }
+        } else{
+			ski_iterations_without_running++;
+		}
+
+		if(ski_iterations_without_running == 1000*1000){
+			// XXX: This should be done based on time
+			//printf("ERROR: Did not find any CPU runnable (hlt + ski probably) (cpus.c)\n");
+			//assert(ski_some_cpu_can_run != 0);
+		}
+		// PF: Disable this case so that CPUs can run individually
+		//   Original: else if (env->stop || env->stopped) {
+        //   Original:  break;
+        //   Original: }
     }
+
     exit_request = 0;
 }
 

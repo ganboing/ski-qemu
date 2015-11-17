@@ -84,7 +84,9 @@ typedef int (*fprintf_function)(FILE *f, const char *fmt, ...)
 
 #ifdef _WIN32
 #define fsync _commit
-#define lseek _lseeki64
+// PF: SKI
+// Removed this because of memfs 
+// #define lseek _lseeki64
 int qemu_ftruncate64(int, int64_t);
 #define ftruncate qemu_ftruncate64
 

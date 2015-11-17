@@ -15,6 +15,9 @@ TMPC="${TMPDIR1}/qemu-conf-${RANDOM}-$$-${RANDOM}.c"
 TMPO="${TMPDIR1}/qemu-conf-${RANDOM}-$$-${RANDOM}.o"
 TMPE="${TMPDIR1}/qemu-conf-${RANDOM}-$$-${RANDOM}.exe"
 
+# SKI: Added library used by dlsym
+LIBS="-ldl -lrt $LIBS"
+
 # NB: do not call "exit" in the trap handler; this is buggy with some shells;
 # see <1285349658-3122-1-git-send-email-loic.minier@linaro.org>
 trap "rm -f $TMPC $TMPO $TMPE" EXIT INT QUIT TERM
@@ -95,6 +98,10 @@ cc_i386=i386-pc-linux-gnu-gcc
 libs_qga=""
 
 target_list=""
+
+# For SKI
+libs_tools="-ldl $libs_tools"
+libs_qga="-ldl $libs_qga"
 
 # Default value for a variable defining feature "foo".
 #  * foo="no"  feature will only be used if --enable-foo arg is given
@@ -235,11 +242,16 @@ sdl_config="${SDL_CONFIG-${cross_prefix}sdl-config}"
 
 # default flags for all hosts
 QEMU_CFLAGS="-fno-strict-aliasing $QEMU_CFLAGS"
+#CFLAGS="-pg -g $CFLAGS"
 CFLAGS="-g $CFLAGS"
 QEMU_CFLAGS="-Wall -Wundef -Wwrite-strings -Wmissing-prototypes $QEMU_CFLAGS"
 QEMU_CFLAGS="-Wstrict-prototypes -Wredundant-decls $QEMU_CFLAGS"
 QEMU_CFLAGS="-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE $QEMU_CFLAGS"
-QEMU_CFLAGS="-D_FORTIFY_SOURCE=2 $QEMU_CFLAGS"
+
+QEMU_CFLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 $QEMU_CFLAGS -Wno-strict-prototypes"
+# XXX: Disable the fortification because it may be giving a stack error on longjmp
+QEMU_CFLAGS="$QEMU_CFLAGS"
+
 QEMU_INCLUDES="-I. -I\$(SRC_PATH) -I\$(SRC_PATH)/fpu"
 LDFLAGS="-g $LDFLAGS"
 
@@ -1095,7 +1107,10 @@ fi
 gcc_flags="-Wold-style-declaration -Wold-style-definition -Wtype-limits"
 gcc_flags="-Wformat-security -Wformat-y2k -Winit-self -Wignored-qualifiers $gcc_flags"
 gcc_flags="-Wmissing-include-dirs -Wempty-body -Wnested-externs $gcc_flags"
-gcc_flags="-fstack-protector-all -Wendif-labels $gcc_flags"
+#XXX: PF: SKI: Disabling teh stack protector
+#gcc_flags="-fstack-protector-all -Wendif-labels $gcc_flags"
+gcc_flags=" -Wendif-labels $gcc_flags"
+
 cat > $TMPC << EOF
 int main(void) { return 0; }
 EOF
@@ -3231,6 +3246,12 @@ if test "$trace_default" = "yes"; then
   echo "CONFIG_TRACE_DEFAULT=y" >> $config_host_mak
 fi
 
+
+# SKI: Disable all tools/checks from teh build targets (to avoid problems when compiling memfs)
+tools=""
+checks=""
+QEMU_CFLAGS="$QEMU_CFLAGS -include ski-memfs.h"
+
 echo "TOOLS=$tools" >> $config_host_mak
 echo "CHECKS=$checks" >> $config_host_mak
 echo "ROMS=$roms" >> $config_host_mak
@@ -3709,11 +3730,11 @@ fi
 if test "$gprof" = "yes" ; then
   echo "TARGET_GPROF=yes" >> $config_target_mak
   if test "$target_linux_user" = "yes" ; then
-    cflags="-p $cflags"
-    ldflags="-p $ldflags"
+    cflags="-pg -p $cflags"
+    ldflags="-pg -p $ldflags"
   fi
   if test "$target_softmmu" = "yes" ; then
-    ldflags="-p $ldflags"
+    ldflags="-pg -p $ldflags"
     echo "GPROF_CFLAGS=-p" >> $config_target_mak
   fi
 fi
@@ -3827,3 +3848,7 @@ symlink $source_path/Makefile.user $d/Makefile
 if test "$docs" = "yes" ; then
   mkdir -p QMP
 fi
+
+
+
+

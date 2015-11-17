@@ -19,6 +19,9 @@
 
 //#define DEBUG_BUFFERED_FILE
 
+// PF: SKI MEMFS
+#undef close
+
 typedef struct QEMUFileBuffered
 {
     BufferedPutFunc *put_buffer;

@@ -26,7 +26,7 @@
 #include "qemu-timer.h"
 #include "slirp/slirp.h"
 #include "main-loop.h"
-
+#include "ski-watchdog.h"
 #ifndef _WIN32
 
 #include "compatfd.h"
@@ -454,6 +454,8 @@ int main_loop_wait(int nonblocking)
     }
 
     ret = select(nfds + 1, &rfds, &wfds, &xfds, &tv);
+
+	ski_watchdog_check();
 
     if (timeout > 0) {
         qemu_mutex_lock_iothread();

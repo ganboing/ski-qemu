@@ -152,17 +152,28 @@ void cpu_smm_update(CPUState *env)
 int cpu_get_pic_interrupt(CPUState *env)
 {
     int intno;
+	SKI_TRACE_ACTIVE("cpu_get_pic_interrupt\n");
 
-    intno = apic_get_interrupt(env->apic_state);
+    if(env->ski_active){
+	    intno = ski_apic_get_interrupt(env->apic_state);
+	}else{
+		intno = original_apic_get_interrupt(env->apic_state);
+	}
+
+	SKI_TRACE_ACTIVE("cpu_get_pic_interrupt: intno=%d\n", intno);
     if (intno >= 0) {
+		SKI_TRACE_ACTIVE("cpu_get_pic_interrupt: Returning intno=%d from the APIC\n", intno);
         return intno;
     }
     /* read the irq from the PIC */
     if (!apic_accept_pic_intr(env->apic_state)) {
+		SKI_TRACE_ACTIVE("cpu_get_pic_interrupt: Returning -1 from the APIC\n");
         return -1;
     }
 
+	SKI_TRACE_ACTIVE("cpu_get_pic_interrupt: executing pic_read_irq()\n");
     intno = pic_read_irq(isa_pic);
+	SKI_TRACE_ACTIVE("cpu_get_pic_interrupt: Returning intno=%d from the PIC\n", intno);
     return intno;
 }
 

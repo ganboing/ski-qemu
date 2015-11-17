@@ -405,7 +405,12 @@ static void rtc_update_second(void *opaque)
         }
         /* should be 244 us = 8 / 32768 seconds, but currently the
            timers do not have the necessary resolution. */
-        delay = (get_ticks_per_sec() * 1) / 100;
+        
+		// SKI PF: Reduced the frequency to reduce the overhead of tracking system calls
+		// Original: delay = (get_ticks_per_sec() * 1) / 100;
+		//delay = (get_ticks_per_sec() * 1) / 2;
+		delay = (get_ticks_per_sec() * 1) / 100;
+
         if (delay < 1)
             delay = 1;
         qemu_mod_timer(s->second_timer2,

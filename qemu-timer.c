@@ -45,6 +45,10 @@
 #endif
 
 #include "qemu-timer.h"
+#include "forkall-coop.h"
+
+int ski_time_expansion_enable = 0;
+
 
 /***********************************************************/
 /* timers */
@@ -147,6 +151,8 @@ static void qemu_rearm_alarm_timer(struct qemu_alarm_timer *t)
 }
 
 /* TODO: MIN_TIMER_REARM_NS should be optimized */
+//#define MIN_TIMER_REARM_NS 250000000
+// Original:
 #define MIN_TIMER_REARM_NS 250000
 
 #ifdef _WIN32
@@ -472,6 +478,11 @@ void qemu_run_all_timers(void)
 {
     alarm_timer->pending = 0;
 
+/*	if(ski_forkall_enabled){
+		//SKI: test!!!!
+		return;
+	}
+*/
     /* rearm timer, if not periodic */
     if (alarm_timer->expired) {
         alarm_timer->expired = 0;
@@ -490,7 +501,16 @@ static void CALLBACK host_alarm_handler(PVOID lpParam, BOOLEAN unused)
 static void host_alarm_handler(int host_signum)
 #endif
 {
-    struct qemu_alarm_timer *t = alarm_timer;
+	//PF: SKI debugging...
+	/*
+    static int ski_alarm_handler_counter = 0;
+	ski_alarm_handler_counter++;
+	if(ski_alarm_handler_counter%20 == 0){
+		printf("host_alarm_handler: %d (pid %d)\n", ski_alarm_handler_counter, getpid());
+	}
+	*/
+
+	struct qemu_alarm_timer *t = alarm_timer;
     if (!t)
 	return;
 
@@ -562,12 +582,18 @@ static int dynticks_start_timer(struct qemu_alarm_timer *t)
 #endif /* SIGEV_THREAD_ID */
     ev.sigev_signo = SIGALRM;
 
+	
+    /* PF SKI: disable dynticks */
+	fprintf(stderr, "[SKI] Dynamic Ticks disabled\n");
+	return -1;
+    /* PF SKI: disable dynticks */
+
+
     if (timer_create(CLOCK_REALTIME, &ev, &host_timer)) {
         perror("timer_create");
 
         /* disable dynticks */
         fprintf(stderr, "Dynamic Ticks disabled\n");
-
         return -1;
     }
 
@@ -636,6 +662,8 @@ static void unix_rearm_timer(struct qemu_alarm_timer *t,
 {
     struct itimerval itv;
     int err;
+
+	//printf("SKI: unix_rearm_timer %lld\n", nearest_delta_ns);
 
     if (nearest_delta_ns < MIN_TIMER_REARM_NS)
         nearest_delta_ns = MIN_TIMER_REARM_NS;
@@ -815,6 +843,11 @@ static void quit_timers(void)
     t->stop(t);
 }
 
+void ski_forkall_quit_timers(void)
+{
+	quit_timers();
+}
+
 int init_timer_alarm(void)
 {
     struct qemu_alarm_timer *t = NULL;
@@ -842,6 +875,42 @@ int init_timer_alarm(void)
 
 fail:
     return err;
+}
+
+// Similar to init_timer_alarm()
+int ski_forkall_reinit_timer_alarm(void){
+
+	assert(alarm_timer);
+	alarm_timer->start(alarm_timer);
+	return 0;
+
+/*
+    struct qemu_alarm_timer *t = NULL;
+    int i, err = -1;
+
+    for (i = 0; alarm_timers[i].name; i++) {
+		printf("Trying alarm name: %s\n", alarm_timers[i].name);
+        t = &alarm_timers[i];
+		
+        err = t->start(t);
+        if (!err)
+            break;
+    }
+
+    if (err) {
+        err = -ENOENT;
+        goto fail;
+    }
+
+   t->pending = 1;
+    alarm_timer = t;
+
+    return 0;
+
+fail:
+    return err;
+
+*/
 }
 
 int qemu_calculate_timeout(void)
