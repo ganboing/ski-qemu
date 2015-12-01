@@ -307,7 +307,7 @@ static inline void ski_stats_add_instruction_access(int eip_address){
 #define SKI_STATS_ASSERT_LOG(assert_condition, code, description_str)		\
 {																					\
     if(assert_condition){															\
-        return;																		\
+        __builtin_trap();															\
     }																				\
     ski_stats_get_self()->exit_code = code;									\
 	sprintf(ski_stats_get_self()->exit_reason, "%s", description_str);			\

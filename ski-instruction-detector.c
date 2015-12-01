@@ -62,16 +62,14 @@ void ski_instruction_detector_load(ski_instruction_detector *id){
         int res;
         char buffer[512];
 
-        res = fgets(buffer, 512-1, fp_input);
-        if(!res){
+        if(!fgets(buffer, 512-1, fp_input)){
             break;
         }
         if(buffer[strlen(buffer)-1]=='\n')
             buffer[strlen(buffer)-1] = 0;
 
-		res = sscanf(buffer, "%x", &eip_address);
 		//printf("Reading entry, res = %d, errno = %d, eip_address=%x\n", res, errno, eip_address);
-		if(res != 1){
+		if(sscanf(buffer, "%x", &eip_address) != 1){
 			break;
 		}
 		ski_instruction_detector_add_entry(id, eip_address);

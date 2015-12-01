@@ -23,7 +23,6 @@
  */
 #include "tcg.h"
 
-
 int gen_new_label(void);
 
 static inline void tcg_gen_op1_i32(TCGOpcode opc, TCGv_i32 arg1)

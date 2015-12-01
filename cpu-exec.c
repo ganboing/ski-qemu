@@ -319,7 +319,7 @@ void ski_snapshot_reinitialize_cpu(CPUState* env){
 	}else{
 		hio.p.hio_test_enter.hg_res = ski_init_options_seed;
 	}
-	int res = cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, &hio, sizeof(hio), 1);
+	int res = cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, (uint8_t*)&hio, sizeof(hio), 1);
 
 
 	// Restored from the snapshot:
@@ -437,7 +437,8 @@ void ski_nontesting_cpus_unblock(CPUState *env){
 		SKI_TRACE("ski_nontesting_cpus_unblock: \n");
 	    while (penv) {
 			if(penv->ski_active != true){
-				assert(penv->ski_old_stop != -1 && penv->ski_old_stopped != -1);
+				//assert(penv->ski_old_stop != -1 && penv->ski_old_stopped != -1);
+				//It is always true
 
 				// Restore the state of the CPUs
 				penv->stop = penv->ski_old_stop;
@@ -1358,7 +1359,7 @@ void ski_threads_dump(CPUState* env){
 			//		tc->exists);
 
 			}else{
-				char *state;
+				const char *state;
 				switch(tc->state){
 					case SKI_TC_STATE_RUNNABLE: state = "RUN"; break;
 					case SKI_TC_STATE_BLOCKED: state = "BLO"; break;
@@ -1421,7 +1422,7 @@ void ski_tc_dump_all(CPUState *env)
 
 void ski_tc_dump(CPUState *env, thread_context* tc)
 {
-	char *state;
+	const char *state;
 	switch(tc->state){
 		case SKI_TC_STATE_RUNNABLE: state = "RUNNABLE"; break;
 		case SKI_TC_STATE_BLOCKED: state = "BLOCKED"; break;

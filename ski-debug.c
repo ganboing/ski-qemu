@@ -276,7 +276,7 @@ void ski_heuristics_statistics_print(int heuristic_type, int instruction_address
 		ski_heuristics_statistics_start();
 	}
 
-	char* heuristic_type_str="NONE";
+	const char* heuristic_type_str="NONE";
 
 	switch(heuristic_type){
 		case SKI_HEURISTICS_STATISTICS_HLT:
@@ -343,7 +343,7 @@ void ski_control_forkall_trace_start(){
 		assert(ski_race_detector_fd);
 	}
 
-	if(strlen(ski_init_options_instructions_detector_filename)>=0){
+	if(strlen(ski_init_options_instructions_detector_filename)>0){
 		sprintf(trace_filename, "forkall_instruction_detector.txt");
 		printf("[SKI] Instruction trace filename: \"%s\"\n", trace_filename);
 		sprintf(trace_filename_full, "%s/%s_%s", ski_init_options_destination_dir, ts, trace_filename);
@@ -368,16 +368,16 @@ void ski_control_forkall_trace_start(){
 
 void ski_rd_print(ski_stats *stats){
 	if(ski_init_options_race_detector_enabled){
-		char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
-		printf("[SKI] Printing race detector results to %s\n", trace_filename);
+		printf("[SKI] Printing race detector results\n");
+		const char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
 		ski_race_detector_print(&stats->rd, trace_filename, stats->seed, stats->input_number[0], stats->input_number[1], ski_race_detector_fd);
 	}
 }
 
 void ski_id_print(ski_stats *stats){
-	if(strlen(ski_init_options_instructions_detector_filename)>=0){
+	if(strlen(ski_init_options_instructions_detector_filename)>0){
 		printf("[SKI] Printing instruction detector results\n");
-		char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
+		const char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
 		ski_instruction_detector_print(&stats->id, stats->trace_filename, stats->seed, stats->input_number[0], stats->input_number[1], ski_instruction_detector_fd);
 	}
 }
@@ -402,8 +402,8 @@ void ski_control_parameters_print(ski_stats *stats){
 
 	ski_forkall_timeval_subtract(&diff, &stats->finish, &stats->start);
 
-	char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
-	char *exit_reason = stats->exit_reason[0] ? stats->exit_reason : "???";
+	const char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
+	const char *exit_reason = stats->exit_reason[0] ? stats->exit_reason : "???";
 	char exit_location[128];
 	char *exit_location_basename;
 
@@ -449,7 +449,7 @@ void ski_exec_trace_flush(void){
     //sync();  // THis would take an extra second or so, mostly because of NFS and other systems
 }
 
-void ski_exec_trace_print_comment(char *comment){
+void ski_exec_trace_print_comment(const char *comment){
     if(ski_exec_trace_execution_fd && (ski_exec_trace_nr_entries < SKI_EXEC_TRACE_MAX_ENTRIES)){
         fprintf(ski_exec_trace_execution_fd, "### %s\n", comment);
         // No need to increment the ski_exec_trace_nr_entries for comments
@@ -505,9 +505,8 @@ void ski_debug_print_config(CPUState* env){
 }
 
 void ski_debug_memory(CPUState* env){
-    char* addr;
+    target_ulong addr;
     char buf[8];
-    int i;
 
     SKI_TRACE("ski_debug_memory\n");
     SKI_TRACE("ski_debug_memory IDT.base=%x IDT.limit=%x\n", env->idt.base, env->idt.limit);
@@ -516,12 +515,11 @@ void ski_debug_memory(CPUState* env){
         int len = MIN((env->idt.base + env->idt.limit) - env->idt.base, sizeof(buf));
         if(len>=8){
 
-            cpu_memory_rw_debug(env,addr, buf, sizeof(buf), 0);
+            cpu_memory_rw_debug(env,addr, (uint8_t*)buf, sizeof(buf), 0);
             //cpu_physical_memory_rw(addr, buf, sizeof(buf), 0);
             //SKI_TRACE("IDT i: %02d %8x %8x\n", i, e1, e2);  
             SKI_TRACE("IDT i: %02d %8x %8x\n", i, ((int*)buf)[0],((int*)buf)[1]);
         }
-        i++;
     }
 }
 

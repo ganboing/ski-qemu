@@ -36,7 +36,7 @@ void* ski_stats_allocate_shared(size_t size){
 	char *shared_memory;
 	long long segment_size;
 
-	printf("[SKI] [STATS] Trying to allocate with size: %lld\n", size);
+	printf("[SKI] [STATS] Trying to allocate with size: %zu\n", size);
 	/* Allocate a shared memory segment.  */ 
 	int segment_id = shmget(IPC_PRIVATE, size, IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
 	if(segment_id == -1){
@@ -50,7 +50,7 @@ void* ski_stats_allocate_shared(size_t size){
 	shared_memory = (char*) shmat (segment_id, 0, 0); 
 	printf("[SKI] [STATS] Shared memory attached at address %p\n", shared_memory); 
 
-	assert(shared_memory != -1);
+	assert(shared_memory != (void*)-1);
 
 	struct shmid_ds shmbuffer; 	
 	/* Determine the segment's size. */ 
@@ -401,8 +401,8 @@ void ski_stats_dump_all_slots(){
 void ski_stats_dump_slot(int slot){
 	ski_stats * stats = &ski_stats_all[slot];
 
-    char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
-    char *exit_reason = stats->exit_reason[0] ? stats->exit_reason : "???";
+    const char *trace_filename = stats->trace_filename[0] ? stats->trace_filename : "???";
+    const char *exit_reason = stats->exit_reason[0] ? stats->exit_reason : "???";
     char exit_location[128];
     char *exit_location_basename;
 

@@ -214,11 +214,9 @@ void ski_config_priorities_parse_file(CPUState *env, char *filename, int seed)
 	plist_n = 0;
 
 	while(1){
-		int res;
 		char buffer[512];
 
-		res = fgets(buffer, 512-1, fp);
-		if(!res){
+		if(!fgets(buffer, 512-1, fp)){
 			break;
 		}
 		if(buffer[strlen(buffer)-1]=='\n')

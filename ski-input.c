@@ -71,15 +71,15 @@ extern int ski_init_options_debug_only_aggregate_output_enabled;
 extern int ski_init_options_trace_instructions_enabled;
 extern int ski_init_options_trace_memory_accesses_enabled;
 
-extern char* ski_init_options_priorities_filename;
-extern char* ski_init_options_ipfilter_filename;
+extern char ski_init_options_priorities_filename[];
+extern char ski_init_options_ipfilter_filename[];
 extern int ski_init_options_forkall_preemption_points;
 extern int ski_init_options_forkall_k_initial;
 extern int ski_init_options_quit_hypercall_threshold;
 
-void ski_input_env_load_str(char *env_name, char *variable);
-void ski_input_env_load_int_range(char *env_name, ski_input_int_range *variable);
-void ski_input_env_load_int(char *env_name, int *variable_out);
+void ski_input_env_load_str(const char *env_name, char *variable);
+void ski_input_env_load_int_range(const char *env_name, ski_input_int_range *variable);
+void ski_input_env_load_int(const char *env_name, int *variable_out);
 void ski_input_init_execution_ts(void);
 static void recursive_mkdir(const char *dir);
 static void ski_input_load_input_file(void);
@@ -100,18 +100,15 @@ static void ski_input_load_input_file(void)
 	}	
 
     while(1){
-        int res;
         char buffer[512];
 
-        res = fgets(buffer, 512-1, fp);
-        if(!res){
+        if(!fgets(buffer, 512-1, fp)){
             break;
         }
         if(buffer[strlen(buffer)-1]=='\n')
             buffer[strlen(buffer)-1] = 0;
 
-        res = sscanf(buffer, "%d", &input_number);
-        if(res != 1){
+        if(sscanf(buffer, "%d", &input_number) != 1){
             break;
         }
 
@@ -141,18 +138,15 @@ static void ski_input_load_input_pairs_file(void)
 	}	
 
     while(1){
-        int res;
         char buffer[512];
 
-        res = fgets(buffer, 512-1, fp);
-        if(!res){
+        if(!fgets(buffer, 512-1, fp)){
             break;
         }
         if(buffer[strlen(buffer)-1]=='\n')
             buffer[strlen(buffer)-1] = 0;
 
-        res = sscanf(buffer, "%d %d", &input1_number, &input2_number);
-        if(res != 2){
+        if(sscanf(buffer, "%d %d", &input1_number, &input2_number) != 2){
             break;
         }
 
@@ -192,12 +186,12 @@ long long int ski_input_init(void)
 
 	long long int total_tests =  ski_init_options_input1_range.range_n * ski_init_options_input2_range.range_n * ski_init_options_interleaving_range.range_n;
 
-	printf("[SKI] ski_input_init: Executing %d tests\n", total_tests);
+	printf("[SKI] ski_input_init: Executing %lld tests\n", total_tests);
 	if(total_tests>1000*1000){
-		printf("[SKI] WARNING: Many tests scheduled\n", total_tests);
+		printf("[SKI] WARNING: Many tests scheduled\n");
 	}
 
-	ski_input_env_load_str("SKI_OUTPUT_DIR", &ski_init_options_destination_dir);
+	ski_input_env_load_str("SKI_OUTPUT_DIR", ski_init_options_destination_dir);
 	assert(strlen(ski_init_options_destination_dir)>0);
 	recursive_mkdir(ski_init_options_destination_dir);
 
@@ -210,17 +204,17 @@ long long int ski_input_init(void)
 	ski_input_env_load_int("SKI_RACE_DETECTOR_ENABLED", &ski_init_options_race_detector_enabled);
 	assert(ski_init_options_race_detector_enabled>=0);
 
-	ski_input_env_load_str("SKI_INSTRUCTIONS_DETECTOR_FILENAME", &ski_init_options_instructions_detector_filename);
+	ski_input_env_load_str("SKI_INSTRUCTIONS_DETECTOR_FILENAME", ski_init_options_instructions_detector_filename);
 
-	ski_input_env_load_str("SKI_SELECTIVE_TRACE_FILENAME", &ski_init_options_selective_trace_filename);
+	ski_input_env_load_str("SKI_SELECTIVE_TRACE_FILENAME", ski_init_options_selective_trace_filename);
 
 	ski_input_env_load_int("SKI_HEURISTICS_STATISTICS_ENABLED", &ski_init_options_heuristics_statistics_enabled);
 
-	ski_input_env_load_str("SKI_INPUT_FILENAME", &ski_init_options_input_filename);
+	ski_input_env_load_str("SKI_INPUT_FILENAME", ski_init_options_input_filename);
 	assert((ski_init_options_input1_range.from_file_single == 0) || (strlen(ski_init_options_input_filename) > 0));
 	ski_input_load_input_file();
 
-	ski_input_env_load_str("SKI_INPUT_PAIRS_FILENAME", &ski_init_options_input_pairs_filename);
+	ski_input_env_load_str("SKI_INPUT_PAIRS_FILENAME", ski_init_options_input_pairs_filename);
 	assert((ski_init_options_input1_range.from_file_pairs == 0) || (strlen(ski_init_options_input_pairs_filename) > 0));
 	assert(strlen(ski_init_options_input_filename) == 0 || strlen(ski_init_options_input_pairs_filename) == 0);
 	ski_input_load_input_pairs_file();
@@ -238,8 +232,8 @@ long long int ski_input_init(void)
 	assert((ski_init_options_debug_exit_after_hypercall_enabled == 0) || (ski_init_options_debug_exit_after_hypercall_enabled == 1));
 
 
-	ski_input_env_load_str("SKI_IPFILTER_FILENAME", &ski_init_options_ipfilter_filename);
-	ski_input_env_load_str("SKI_PRIORITIES_FILENAME", &ski_init_options_priorities_filename);
+	ski_input_env_load_str("SKI_IPFILTER_FILENAME", ski_init_options_ipfilter_filename);
+	ski_input_env_load_str("SKI_PRIORITIES_FILENAME", ski_init_options_priorities_filename);
 	ski_input_env_load_int("SKI_FORKALL_ENABLED", &ski_forkall_enabled);
 	ski_input_env_load_int("SKI_FORKALL_CONCURRENCY",&ski_init_options_forkall_concurrency);
 	assert(ski_init_options_forkall_concurrency>0);
@@ -370,7 +364,7 @@ void ski_input_fork_init(int *out_new_input)
 		//XXX: Improve: slow and not nice...
 		if((ski_init_options_dir_per_input_enabled) && (ski_init_options_debug_only_aggregate_output_enabled==0)){
 			char env_ski_output_dir[1024];
-			ski_input_env_load_str("SKI_OUTPUT_DIR", &env_ski_output_dir);
+			ski_input_env_load_str("SKI_OUTPUT_DIR", env_ski_output_dir);
 			sprintf(ski_init_options_destination_dir, "%s/%d_%d/", env_ski_output_dir, ski_init_options_input_number[0], ski_init_options_input_number[1]);
 			recursive_mkdir(ski_init_options_destination_dir);
 		}
@@ -414,7 +408,7 @@ void ski_input_init_execution_ts(void)
 	assert(strftime(ski_init_execution_ts, sizeof(ski_init_execution_ts), "%Y%m%d_%H%M%S", tmp));
 }
 
-void ski_input_env_load_int(char *env_name, int *variable_out){
+void ski_input_env_load_int(const char *env_name, int *variable_out){
     char *env_str;
     env_str = getenv(env_name);
     if(env_str && (strlen(env_str)>0)){
@@ -428,7 +422,7 @@ void ski_input_env_load_int(char *env_name, int *variable_out){
 }
 
 
-void ski_input_env_load_str(char *env_name, char *variable){
+void ski_input_env_load_str(const char *env_name, char *variable){
     char *env_str;
     env_str = getenv(env_name);
     if(env_str && (strlen(env_str)>0)){
@@ -444,12 +438,12 @@ void ski_input_env_load_str(char *env_name, char *variable){
 
 // Range should have the format [[@]@][+]<int>[-<int>](,<int>[-<int>])*
 //   such as "2,4,5-7" or "4-6,9-12"
-void ski_input_env_load_int_range(char *env_name, ski_input_int_range *variable){
+void ski_input_env_load_int_range(const char *env_name, ski_input_int_range *variable){
     char *env_str;
 	char *next_str;
     env_str = getenv(env_name);
 
-	memset(variable, 0, sizeof(variable));
+	memset(variable, 0, sizeof(*variable));
 
     if(env_str && (strlen(env_str)>0)){
 		long long int i;

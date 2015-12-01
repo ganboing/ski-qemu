@@ -57,6 +57,7 @@ void ski_timer_handler(union sigval arg)
 
 void ski_watchdog_init(int seconds)
 {
+	return;
 	timer_t timerid;
 	struct sigevent sev;
 	struct itimerspec its;

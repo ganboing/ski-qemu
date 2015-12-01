@@ -54,7 +54,7 @@ static inline void ski_liveness_init(ski_ma *ma, int max_entries){
 
 static inline int ski_liveness_store(ski_ma *ma, int eip, int mem_address, int mem_value){
 	if(!ma->is_initialized)
-		return;
+		__builtin_trap();
 
 	// If mem_address already exists bump counter (but make sure to override the mem_value if necessary and reset the counter)
 	ski_ma_entry * mae;

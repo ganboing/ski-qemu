@@ -163,6 +163,7 @@ static ssize_t handle_aiocb_flush(struct qemu_paiocb *aiocb)
 		// PF: SKI:
 //		printf("handle_aiocb_flush: fdatasync disabled (use the hypercall sync for it)!\n");
 	    //ret = qemu_fdatasync(aiocb->aio_fildes);
+		__builtin_trap();
 	}else{
 		ret = 0;
 	}

@@ -15,6 +15,7 @@
 
 #include <string.h>
 #include <assert.h>
+#include "osdep.h"
 #include "uthash.h"
 
 #define SKI_INSTRUCTION_DETECTOR_ENTRIES_MAX (128*1024)
@@ -58,7 +59,7 @@ static inline void ski_instruction_detector_new_access(ski_instruction_detector 
     HASH_FIND_INT(id->instructions_hash, &eip_address, entry);
        
     if(likely(entry == 0)){
-        return 1;
+        return;
     }  
 	if(entry->count == 0){
 		id->total_distinct_instructions++;
@@ -66,7 +67,7 @@ static inline void ski_instruction_detector_new_access(ski_instruction_detector 
 	entry->count++;
 	id->total_instructions++;
 
-    return 0;
+    return;
 
 }
 

@@ -9,7 +9,7 @@
  *
  */
 
-
+#pragma GCC diagnostic warning "-w"
 
 #include "ski-memfs.h"
 
@@ -37,7 +37,7 @@
 
 #ifndef MEMFS_DISABLED
 
-#warning "Compling with memfs"
+#warning "Compiling with memfs"
 
 
 /*
@@ -1806,25 +1806,18 @@ int timer_settime(timer_t timerid, int flags,
                          const struct itimerspec *new_value,
                          struct itimerspec * old_value)
 {
-    int ret;
-
     init_wrappers();
     DEBUG_WRAPPER(timer_settime)
 
-	default_timer_settime(timerid, flags, new_value, old_value);
-
-	return ret;
+	return default_timer_settime(timerid, flags, new_value, old_value);
 }
 
 int timer_gettime(timer_t timerid, struct itimerspec *curr_value)
 {
-    int ret;
-
     init_wrappers();
     DEBUG_WRAPPER(timer_gettime)
 
-	default_timer_gettime(timerid, curr_value);
-	return ret;
+	return default_timer_gettime(timerid, curr_value);
 }
 
 

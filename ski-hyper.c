@@ -33,7 +33,6 @@ extern int ski_time_expansion_enable;
 
 void ski_process_hypercall(CPUState *env){
     int guest_value;
-    int res;
     hypercall_io hio;
 
     ski_trace_active=true;
@@ -45,7 +44,7 @@ void ski_process_hypercall(CPUState *env){
 
     bzero(&hio, sizeof(hypercall_io));
     SKI_TRACE("Reading from guest the result of the hypercall\n");
-    res = cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, &hio, sizeof(hio), 0);
+    cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, (uint8_t*)&hio, sizeof(hio), 0);
 
     if(hio.magic_start != HYPERCALL_IO_MAGIC_START || hio.magic_end != HYPERCALL_IO_MAGIC_END || hio.size != sizeof(hio)){
         SKI_TRACE("Hypercall_io structure corrupted (0x%x, 0x%x, 0x%x, 0x%x, 0x%x, 0x%x)\n",
@@ -93,7 +92,7 @@ void ski_process_hypercall(CPUState *env){
 				hio.p.hio_test_enter.hg_res = ski_init_options_seed;
 			}
 			// XXX: This does not work with the forkall optimization...need to do it agian in the ski_init probably in the cpu_exec during snapshot resume
-            res = cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, &hio, sizeof(hio), 1);
+            cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, (uint8_t*)&hio, sizeof(hio), 1);
 
 			ski_liveness_init(&env->ski_cpu.cpu_rs, SKI_MA_ENTRIES_MAX);
 
@@ -133,7 +132,7 @@ void ski_process_hypercall(CPUState *env){
             hio.p.hio_test_exit.hg_nr_instr_executed_other = env->ski_cpu.nr_instr_executed_other;
 
             SKI_TRACE("Writing to guest the result of the hypercall\n");
-            res = cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, &hio, sizeof(hio), 1);
+            cpu_memory_rw_debug(env, env->regs[R_ECX] + env->segs[R_DS].base, (uint8_t*)&hio, sizeof(hio), 1);
 				
 			char debug_str[128];
 		    sprintf(debug_str, "CPU %d reached exit hypercall", env->cpu_index);

@@ -178,6 +178,7 @@ int main(int argc, char **argv)
 #include "ski-config.h"
 #include "ski-ipfilter.h"
 #include "ski-by-eip.h"
+#include "ski-watchdog.h"
 #include "utlist.h"
 
 
@@ -333,8 +334,6 @@ void ski_forkall_reinit_qemu_init_cpu_loop(void);
 
 
 void ski_eipfilter_add_stats(ski_stats *stats);
-
-extern moncontrol(int mode);
 
 typedef struct FWBootEntry FWBootEntry;
 
@@ -1569,7 +1568,7 @@ static void ski_cpu_parse(const char *optarg)
 	//
 	//  NOT IMPLEMENTED FOR NOW 
 	//
-    int cpu_index, max_instructions;
+    int cpu_index, max_instructions = 0;
     char *endptr;
     char option[128];
 
@@ -1588,7 +1587,7 @@ static void ski_cpu_parse(const char *optarg)
 }
 
 
-static int ski_sha_file(char *filename, char*dest_str){
+static int ski_sha_file(const char *filename, char*dest_str){
 	FILE *fp;
 	
 	dest_str[0] = 0;
@@ -1596,7 +1595,7 @@ static int ski_sha_file(char *filename, char*dest_str){
 	if(filename && (fp = fopen(filename, "r"))){
 		//printf("filename: %s\n", filename);
 		int res, i;
-		char *buffer;
+		unsigned char *buffer;
 	    SHA1_CTX ctx;
 		unsigned char hash[20];
 		int total_bytes = 0;
@@ -1629,7 +1628,7 @@ static int ski_sha_file(char *filename, char*dest_str){
 	return 0;
 }
 
-static void ski_hash_kernel(char *kernel_filename){
+static void ski_hash_kernel(const char *kernel_filename){
 	if(kernel_filename){
 		printf("[SKI] Hashing kernel_filename: %s\n", kernel_filename);
 		strcpy(ski_init_kernel_filename,kernel_filename);
@@ -1643,7 +1642,7 @@ static void ski_hash_kernel(char *kernel_filename){
 	}
 }
 
-static void ski_hash_disk(char *disk_filename){
+static void ski_hash_disk(const char *disk_filename){
 	if(disk_filename){
 		printf("[SKI] Hashing disk_filename: %s\n", disk_filename);
 		strcpy(ski_init_disk_filename,disk_filename);
@@ -2878,7 +2877,7 @@ static void ski_dump_snapshots(BlockDriverState *bs)
 void ski_get_snapshot(char *filename)
 {
     int c;
-	char *fmt = 0;
+	const char *fmt = 0;
     //const char *filename, *fmt;
     BlockDriverState *bs;
     char fmt_name[128], size_buf[128], dsize_buf[128];
@@ -4593,7 +4592,7 @@ int main(int argc, char **argv, char **envp)
 
 		if(strlen(ski_snapshot_name_auto)>0){
 			printf("[SKI] Using snapshot name automatically extracted form the VM image (%s vs. %s)\n", loadvm, ski_snapshot_name_auto);
-			sprintf(loadvm, "%s", ski_snapshot_name_auto);
+			sprintf((char*)loadvm, "%s", ski_snapshot_name_auto);
 		}
 		printf("Loading vm: %s\n", loadvm);
 

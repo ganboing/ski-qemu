@@ -35,7 +35,6 @@
 #include "forkall-coop.h"
 #include "ski-stats.h"
 #include "ski-heuristics.h"
-#include "ski-race-detector.h"
 #include "ski-instruction-detector.h"
 #include "ski-memory-detector.h"
 
@@ -44,6 +43,8 @@
 #endif /* !defined(CONFIG_USER_ONLY) */
 
 //#define DEBUG_PCALL
+
+#include "ski-race-detector-impl.h"
 
 #define SKI_LOOP_ENABLED 1
 #define SKI_LOOP_INTERATIONS_ACTIVATE 10
@@ -119,7 +120,7 @@ static inline bool ski_correct_thread(void);
 // PF: ==========================
 #define SPIKE_KERNEL_SYSCALL_INT 0x80
 
-static int ski_last_eip = 0;
+static target_ulong ski_last_eip = 0;
 
 static inline void dump_memory_access(uint32_t mem_address, uint32_t value, int mem_index, int n_bits, int is_load, FILE *fd)
 {
@@ -155,20 +156,14 @@ static inline void dump_memory_access(uint32_t mem_address, uint32_t value, int 
 
 extern int ski_init_options_race_detector_enabled;
 
-static inline void race_detector(int mem_address, int n_bits, int is_read)
+static inline void race_detector(uint32_t vaddr,uint32_t value, int n_bits, int is_read)
 {
 	if(ski_init_options_race_detector_enabled){
 		ski_race_detector *rd = &ski_stats_get_self()->rd;
 		int length = n_bits / 8;
 		int cpu = env->cpu_index;
 
-		int paddr = 0;
-        paddr = cpu_get_phys_page_debug(env, mem_address);
-        if (paddr != -1){
-            paddr = (paddr & TARGET_PAGE_MASK) | (mem_address & ~TARGET_PAGE_MASK);
-        }
-
-		ski_race_detector_new_access(rd, cpu, paddr, ski_last_eip, length, is_read, ski_exec_instruction_counter_total);
+		ski_race_detector_new_access(rd, cpu, ski_last_eip, vaddr, value, length, is_read, ski_exec_instruction_counter_total);
 	}
 }
 
@@ -194,14 +189,14 @@ static inline void memory_detector(int mem_address, int n_bits, int is_read){
 // ignore the instruction accesses
 void helper_ski_load_access(uint32_t address, uint32_t value, int mem_index, int n_bits) {
     if(env->ski_active == false){
-		return false;
+		return;
 	}
 #ifdef SKI_MEMORY_INTERCEPT_EXECUTION_FILE
 	int is_load = 1;
 	dump_memory_access(address, value, mem_index, n_bits, is_load, ski_exec_trace_execution_fd);
 #endif
 
-	race_detector(address, n_bits, 1);
+	race_detector(address, value, n_bits, 1);
 	memory_detector(address, n_bits, 1);
 
 	int count = ski_liveness_store(&env->ski_cpu.cpu_rs, ski_last_eip, address, value);
@@ -218,14 +213,14 @@ void helper_ski_load_access(uint32_t address, uint32_t value, int mem_index, int
 
 void helper_ski_store_access(uint32_t address, uint32_t value, int mem_index, int n_bits) {
     if(env->ski_active == false){
-		return false;
+		return;
 	}
 #ifdef SKI_MEMORY_INTERCEPT_EXECUTION_FILE
 	int is_load = 0;
 	dump_memory_access(address, value, mem_index, n_bits, is_load , ski_exec_trace_execution_fd);
 #endif
 
-	race_detector(address, n_bits, 0);
+	race_detector(address, value, n_bits, 0);
 	memory_detector(address, n_bits, 0);
 	
 	int woke_up_some_thread = ski_threads_all_wake_rs(env, address);
@@ -491,7 +486,7 @@ static inline void ski_do_hlt(void){
 	// No need to call  cpu_loop_exit() (because caller does)
 }
 
-void helper_ski_instrument_all(int explicit_eip)
+void helper_ski_instrument_all(target_ulong explicit_eip)
 {
 	ski_last_eip = explicit_eip;
 	if(likely(env->ski_active == false)){

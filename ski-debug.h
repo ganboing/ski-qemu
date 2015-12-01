@@ -50,10 +50,9 @@ typedef struct CPUX86State CPUX86State;
 
 
 void ski_exec_trace_start(CPUState* env);
-void ski_exec_trace_print_comment(char *comment);
 void ski_exec_trace_stop(CPUState* env);
 void ski_exec_trace_flush(void);
-void ski_exec_trace_print_comment(char *comment);
+void ski_exec_trace_print_comment(const char *comment);
 void ski_exec_trace_print_initial_comment(CPUState* env);
 
 

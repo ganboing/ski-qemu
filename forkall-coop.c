@@ -91,10 +91,10 @@ static void ski_get_fsgs_addr(void){
 	int code = ARCH_GET_FS;
 	unsigned long  value;
 	unsigned long *addr =  &value;
-	int res = arch_prctl(code, addr);
+	arch_prctl(code, addr);
 	ski_log_forkall("FS = %lx\n", value);
 	code = ARCH_GET_GS;
-	res = arch_prctl(code, addr);
+	arch_prctl(code, addr);
 	ski_log_forkall("GS = %lx\n", value);
 }
 
@@ -148,7 +148,7 @@ void ski_forkall_thread_add_self_tid(void){
 
         if((((void*)&dummy) > t->stack_min) && (((void*)&dummy) < t->stack_max)){
             t->tid_original = tid;
-            ski_log_forkall("Found stack: %llx - %llx (seq = %d, tid = %d)\n", t->stack_min, t->stack_max, i, tid);
+            ski_log_forkall("Found stack: %p - %p (seq = %d, tid = %d)\n", t->stack_min, t->stack_max, i, tid);
             pthread_mutex_unlock(&forkall_mutex);
             return;
         }

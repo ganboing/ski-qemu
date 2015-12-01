@@ -60,7 +60,7 @@
 #error unsupported CPU
 #endif
 
-#if defined(AREG0)
+#if defined(AREG0) && !defined(__clang__)
 register CPUState *env asm(AREG0);
 #else
 /* TODO: Try env = cpu_single_env. */
